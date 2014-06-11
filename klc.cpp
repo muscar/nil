@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <memory>
 #include <exception>
@@ -9,6 +10,7 @@
 
 #include <llvm/Analysis/Passes.h>
 #include <llvm/Analysis/Verifier.h>
+#include <llvm/Bitcode/ReaderWriter.h>
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
 #include <llvm/ExecutionEngine/JIT.h>
 #include <llvm/IR/DataLayout.h>
@@ -17,6 +19,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/PassManager.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Transforms/Scalar.h>
 
@@ -252,6 +255,25 @@ namespace kaleidoscope
         }
     };
 
+    class module_node
+    {
+        std::vector<std::unique_ptr<def_node>> defs_;
+    public:
+        void add_def(std::unique_ptr<def_node> def)
+        {
+            defs_.push_back(std::move(def));
+        }
+
+        void codegen(codegen_ctx &ctx)
+        {
+            for (auto &&def : defs_) {
+                auto f = def->codegen(ctx);
+                llvm::verifyFunction(*f);
+                ctx.pass_mgr_.run(*f);
+            }
+        }
+    };
+
     // Scanner
 
     enum class token
@@ -301,14 +323,14 @@ namespace kaleidoscope
     static std::string lexeme;
 
     template<typename UnaryPredicate>
-    void read_while(std::istringstream &in, UnaryPredicate pred)
+    void read_while(std::istream &in, UnaryPredicate pred)
     {
         lexeme.clear();
         while (!in.eof() && pred(in.peek()))
             lexeme.push_back(in.get());
     }
 
-    token next(std::istringstream &in)
+    token next(std::istream &in)
     {
         if (in.eof())
             return token::eof;
@@ -335,7 +357,7 @@ namespace kaleidoscope
             read_while(in, isdigit);
             tok = token::num;
         } else if (isalnum(in.peek())) {
-            read_while(in, isalnum);
+            read_while(in, [](auto c) { return isalnum(c) || c == '_'; });
             if (lexeme == "fun")
                 tok = token::kw_fun;
             else if (lexeme == "extern")
@@ -354,17 +376,27 @@ namespace kaleidoscope
     {
     public:
         token curr_tok_;
-        std::istringstream &in_;
+        std::istream &in_;
 
     public:
-        parser(std::istringstream &in) : in_(in) { }
+        parser(std::istream &in) : in_(in) { }
 
-        std::unique_ptr<def_node> parse()
+        std::unique_ptr<module_node> parse()
         {
-            // move_next();
-            return parse_def();
+            move_next();
+            return parse_module();
         }
 
+        // module = { def }
+        std::unique_ptr<module_node> parse_module()
+        {
+            auto mod = std::make_unique<module_node>();
+            while (curr_tok_ == token::kw_extern || curr_tok_ == token::kw_fun)
+                mod->add_def(parse_def());
+            return mod;
+        }
+
+        // def = fun_proto | fun_decl
         std::unique_ptr<def_node> parse_def()
         {
             switch (curr_tok_) {
@@ -469,7 +501,7 @@ namespace kaleidoscope
             return std::make_unique<call_node>(name, std::move(args));
         }
 
-    // private:
+    private:
         void move_next()
         {
             curr_tok_ = next(in_);
@@ -479,7 +511,7 @@ namespace kaleidoscope
         {
             auto aux = curr_tok_;
             if (aux != tok) {
-                std::cerr << "expecting " << to_string(tok) << ", but got " << to_string(aux) << std::endl;
+                std::cerr << "expecting " << to_string(tok) << ", but got " << to_string(aux) << "(" << lexeme << ")" << std::endl;
                 throw std::domain_error(to_string(aux));
             }
             move_next();
@@ -488,62 +520,84 @@ namespace kaleidoscope
     };
 }
 
-bool prompt(const std::string &prompt, std::string &input)
-{
-    std::cout << prompt;
-    return static_cast<bool>(std::getline(std::cin, input));
-}
+// bool prompt(const std::string &prompt, std::string &input)
+// {
+//     std::cout << prompt;
+//     return static_cast<bool>(std::getline(std::cin, input));
+// }
 
-extern "C"
-double putchard(double d)
-{
-    putchar((char) d);
-    return 0;
-}
+// void handle_toplevel(kaleidoscope::codegen_ctx &ctx, std::unique_ptr<kaleidoscope::def_node> node)
+// {
+//     auto f = node->codegen(ctx);
+
+//     llvm::verifyFunction(*f);
+//     ctx.pass_mgr_.run(*f);
+
+//     f->dump();
+// }
+
+// void handle_toplevel(kaleidoscope::codegen_ctx &ctx, std::unique_ptr<kaleidoscope::expr_node> node)
+// {
+//     auto f = ctx.module_.getFunction("toplevel_wrapper");
+//     if (f)
+//         f->eraseFromParent();
+
+//     auto double_ty = llvm::Type::getDoubleTy(llvm::getGlobalContext());
+//     std::vector<llvm::Type *> param_tys;
+//     auto fun_ty = llvm::FunctionType::get(double_ty, param_tys, false);
+//     f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, "toplevel_wrapper", &ctx.module_);
+
+//     auto block = llvm::BasicBlock::Create(llvm::getGlobalContext(), "entry", f);
+//     ctx.builder_.SetInsertPoint(block);
+
+//     auto ret_val = node->codegen(ctx);
+//     ctx.builder_.CreateRet(ret_val);
+
+//     llvm::verifyFunction(*f);
+//     ctx.pass_mgr_.run(*f);
+
+//     auto fptr = ctx.exec_engine_->getPointerToFunction(f);
+//     double (*fp)() = (double (*)())(intptr_t)fptr;
+//     auto val = fp();
+//     std::cout << "- " << val << std::endl;
+// }
 
 int main(int argc, const char *argv[])
 {
     kaleidoscope::codegen_ctx ctx{"kaleidoscope"};
     ctx.init();
 
-    std::string input;
-    while (prompt("* ", input)) {
-        std::istringstream s{input};
-        // kaleidoscope::parser p{s};
+    std::ifstream in(argv[1]);
+    kaleidoscope::parser p{in};
 
-        // auto node = p.parse();
-        // node->codegen(ctx);
+    auto node = p.parse();
+    node->codegen(ctx);
 
-        kaleidoscope::parser p{s};
+    std::string err;
+    llvm::raw_fd_ostream os("out.bc", err);
+    llvm::WriteBitcodeToFile(&ctx.module_, os);
 
-        p.move_next();
+    // std::string input;
+    // while (prompt("* ", input)) {
+    //     if (input == "#dump") {
+    //         std::string err;
+    //         llvm::raw_fd_ostream os("out.bc", err);
+    //         llvm::WriteBitcodeToFile(&ctx.module_, os);
+    //     } else {
+    //         std::istringstream s{input};
+    //         kaleidoscope::parser p{s};
 
-        if (p.curr_tok_ == kaleidoscope::token::kw_extern || p.curr_tok_ == kaleidoscope::token::kw_fun) {
-            auto node = p.parse();
-            auto f = node->codegen(ctx);
+    //         p.move_next();
 
-            llvm::verifyFunction(*f);
-            ctx.pass_mgr_.run(*f);
+    //         if (p.curr_tok_ == kaleidoscope::token::kw_extern || p.curr_tok_ == kaleidoscope::token::kw_fun)
+    //             handle_toplevel(ctx, p.parse());
+    //         else
+    //             handle_toplevel(ctx, p.parse_expr());
+    //     }
 
-            f->dump();
-        } else {
-            auto body = p.parse_expr();
-            auto proto = std::make_unique<kaleidoscope::prototype_node>("", std::vector<std::string>());
-            auto node = std::make_unique<kaleidoscope::function_node>(std::move(proto), std::move(body));
+    // }
 
-            auto f = node->codegen(ctx);
-
-            llvm::verifyFunction(*f);
-            ctx.pass_mgr_.run(*f);
-
-            auto fptr = ctx.exec_engine_->getPointerToFunction(f);
-            double (*fp)() = (double (*)())(intptr_t)fptr;
-            auto val = fp();
-            std::cout << "- " << val << std::endl;
-        }
-    }
-
-    ctx.module_.dump();
+    // ctx.module_.dump();
 
     return 0;
 }

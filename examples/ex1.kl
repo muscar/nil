@@ -1,0 +1,5 @@
+extern fun putchard(c)
+
+fun kl_main() {
+  putchard(97)
+}
