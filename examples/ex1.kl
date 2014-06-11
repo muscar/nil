@@ -1,9 +1,18 @@
-extern fun putchard(c)
+extern fun putchard(c: double): double
 
-fun kl_main() {
+fun main(): double {
   putchard(104);
   putchard(101);
   putchard(108);
   putchard(108);
-  putchard(111)
+  putchard(111);
+  putchard(32);
+  putchard(119);
+  putchard(111);
+  putchard(114);
+  putchard(108);
+  putchard(100);
+  putchard(33);
+  putchard(10);
+  0
 }

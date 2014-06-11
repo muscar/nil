@@ -31,6 +31,7 @@ namespace kaleidoscope
         llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
         std::map<std::string, llvm::Value *> symtab_;
+        std::map<std::string, llvm::Type *> tenv_;
 
         codegen_ctx(const std::string &name)
         : module_{name, llvm::getGlobalContext()}, pass_mgr_{&module_}, builder_{llvm::getGlobalContext()}
@@ -38,6 +39,12 @@ namespace kaleidoscope
 
         void init()
         {
+            tenv_["int8"] = llvm::Type::getInt8Ty(llvm::getGlobalContext());
+            tenv_["int16"] = llvm::Type::getInt16Ty(llvm::getGlobalContext());
+            tenv_["int32"] = llvm::Type::getInt32Ty(llvm::getGlobalContext());
+            tenv_["int64"] = llvm::Type::getInt64Ty(llvm::getGlobalContext());
+            tenv_["double"] = llvm::Type::getDoubleTy(llvm::getGlobalContext());
+
             llvm::InitializeNativeTarget();
 
             pass_mgr_.add(llvm::createBasicAliasAnalysisPass());
@@ -49,6 +56,16 @@ namespace kaleidoscope
             pass_mgr_.doInitialization();
         }
     };
+
+    // Types
+
+    llvm::Type *resolve_type(const codegen_ctx &ctx, const std::string &name)
+    {
+        auto it = ctx.tenv_.find(name);
+        if (it == ctx.tenv_.end())
+            throw std::domain_error("unknown type");
+        return it->second;
+    }
 
     // AST
 
@@ -90,10 +107,10 @@ namespace kaleidoscope
 
         llvm::Value *codegen(codegen_ctx &ctx)
         {
-            auto value = ctx.symtab_[name_];
-            if (!value)
+            auto it = ctx.symtab_.find(name_);
+            if (it == ctx.symtab_.end())
                 throw std::domain_error("unbound variable");
-            return value;
+            return it->second;
         }
     };
 
@@ -195,23 +212,42 @@ namespace kaleidoscope
     public:
         virtual ~def_node() { }
 
+        // XXX This is too restrictive, e.g. type defs don't return functions
         virtual llvm::Function *codegen(codegen_ctx &ctx) = 0;
+    };
+
+    class struct_node : public def_node
+    {
+        std::string name_;
+        std::vector<std::string> fields_;
+    public:
+        struct_node(std::string name, std::vector<std::string> fields)
+        : name_(name), fields_(fields)
+        { }
+
+        llvm::Function *codegen(codegen_ctx &ctx)
+        {
+
+            return nullptr;
+        }
     };
 
     class prototype_node : public def_node
     {
         std::string name_;
-        std::vector<std::string> params_;
+        std::vector<std::pair<std::string, std::string>> params_;
+        std::string ty_annot_;
     public:
-        prototype_node(std::string name, std::vector<std::string> params)
-        : name_(name), params_(params)
+        prototype_node(std::string name, std::vector<std::pair<std::string, std::string>> params, std::string ty_annot)
+        : name_(name), params_(params), ty_annot_(ty_annot)
         { }
 
         llvm::Function *codegen(codegen_ctx &ctx)
         {
-            auto double_ty = llvm::Type::getDoubleTy(llvm::getGlobalContext());
-            std::vector<llvm::Type *> param_tys(params_.size(), double_ty);
-            auto fun_ty = llvm::FunctionType::get(double_ty, param_tys, false);
+            std::vector<llvm::Type *> param_tys(params_.size());
+            std::transform(params_.begin(), params_.end(), param_tys.begin(), [&](auto param) { return resolve_type(ctx, param.second); });
+
+            auto fun_ty = llvm::FunctionType::get(resolve_type(ctx, ty_annot_), param_tys, false);
             auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, name_, &ctx.module_);
             
             if (f->getName() != name_) {
@@ -227,8 +263,9 @@ namespace kaleidoscope
 
             auto idx = 0;
             for (auto iter = f->arg_begin(); idx != params_.size(); ++iter, ++idx) {
-                iter->setName(params_[idx]);
-                ctx.symtab_[params_[idx]] = iter;
+                auto name = params_[idx].first;
+                iter->setName(name);
+                ctx.symtab_[name] = iter;
             }
 
             return f;
@@ -256,6 +293,9 @@ namespace kaleidoscope
             auto ret_val = body_->codegen(ctx);
             ctx.builder_.CreateRet(ret_val);
 
+            llvm::verifyFunction(*f);
+            ctx.pass_mgr_.run(*f);
+
             return f;
         }
     };
@@ -272,9 +312,7 @@ namespace kaleidoscope
         void codegen(codegen_ctx &ctx)
         {
             for (auto &&def : defs_) {
-                auto f = def->codegen(ctx);
-                llvm::verifyFunction(*f);
-                ctx.pass_mgr_.run(*f);
+                def->codegen(ctx);
             }
         }
     };
@@ -287,6 +325,7 @@ namespace kaleidoscope
         eof = -1,
         ident = 0,
         num,
+        kw_struct,
         kw_fun,
         kw_extern,
         lpar,
@@ -294,6 +333,7 @@ namespace kaleidoscope
         lcurly,
         rcurly,
         comma,
+        colon,
         semicolon
     };
 
@@ -304,6 +344,8 @@ namespace kaleidoscope
                 return "unknown";
             case token::eof:
                 return "end of file";
+            case token::kw_struct:
+                return "struct keyword";
             case token::kw_fun:
                 return "fun keyword";
             case token::kw_extern:
@@ -322,6 +364,8 @@ namespace kaleidoscope
                 return "}";
             case token::comma:
                 return ",";
+            case token::colon:
+                return ":";
             case token::semicolon:
                 return ";";
         }
@@ -361,6 +405,9 @@ namespace kaleidoscope
         } else if (in.peek() == ',') {
             tok = token::comma;
             in.get();
+        } else if (in.peek() == ':') {
+            tok = token::colon;
+            in.get();
         } else if (in.peek() == ';') {
             tok = token::semicolon;
             in.get();
@@ -369,7 +416,9 @@ namespace kaleidoscope
             tok = token::num;
         } else if (isalnum(in.peek())) {
             read_while(in, [](auto c) { return isalnum(c) || c == '_'; });
-            if (lexeme == "fun")
+            if (lexeme == "struct")
+                tok = token::kw_struct;
+            else if (lexeme == "fun")
                 tok = token::kw_fun;
             else if (lexeme == "extern")
                 tok = token::kw_extern;
@@ -431,7 +480,7 @@ namespace kaleidoscope
             return std::make_unique<function_node>(std::move(proto), std::move(body));
         }
 
-        // fun_proto = "fun" ident "(" [ident {"," ident}] } ")"
+        // fun_proto = "fun" ident "(" [ident {"," ident}] } ")" ":" ident
         std::unique_ptr<prototype_node> parse_prototype()
         {
             expect(token::kw_fun);
@@ -440,21 +489,33 @@ namespace kaleidoscope
 
             expect(token::lpar);
 
-            std::vector<std::string> params;
+            std::vector<std::pair<std::string, std::string>> params;
 
             if (curr_tok_ != token::rpar) {
-                expect(token::ident);
-                params.push_back(lexeme);
+                params.push_back(parse_annotated_ident());
                 while (curr_tok_ == token::comma) {
                     move_next();
-                    expect(token::ident);
-                    params.push_back(lexeme);
+                    params.push_back(parse_annotated_ident());
                 }
             }
 
             expect(token::rpar);
+            expect(token::colon);
+            auto ty_annot = lexeme;
+            expect(token::ident);
 
-            return std::make_unique<prototype_node>(name, std::move(params));
+            return std::make_unique<prototype_node>(name, std::move(params), ty_annot);
+        }
+
+        // annotated_ident = ident ":" ident
+        std::pair<std::string, std::string> parse_annotated_ident()
+        {
+            auto name = lexeme;
+            expect(token::ident);
+            expect(token::colon);
+            auto ty_annot = lexeme;
+            expect(token::ident);
+            return std::make_pair(name, ty_annot);
         }
 
         // expr_seq = expr { ";" expr }
