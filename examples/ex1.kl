@@ -1,5 +1,9 @@
 extern fun putchard(c)
 
 fun kl_main() {
-  putchard(97)
+  putchard(104);
+  putchard(101);
+  putchard(108);
+  putchard(108);
+  putchard(111)
 }

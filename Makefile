@@ -1,6 +1,6 @@
 CC=clang++
 CXXFLAGS=-std=c++1y -Wall -O3
-LDFLAGS=$(shell llvm-config-3.4 --cppflags --ldflags --libs core jit native bitwriter support)
+LDFLAGS=$(shell llvm-config-3.4 --cppflags --ldflags --libs core native bitwriter support)
 TARGET=klc
 
 all:

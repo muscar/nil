@@ -11,8 +11,6 @@
 #include <llvm/Analysis/Passes.h>
 #include <llvm/Analysis/Verifier.h>
 #include <llvm/Bitcode/ReaderWriter.h>
-#include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/ExecutionEngine/JIT.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IRBuilder.h>
@@ -29,7 +27,6 @@ namespace kaleidoscope
 
     struct codegen_ctx
     {
-        llvm::ExecutionEngine *exec_engine_;
         llvm::Module module_;
         llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
@@ -42,16 +39,6 @@ namespace kaleidoscope
         void init()
         {
             llvm::InitializeNativeTarget();
-
-            std::string err;
-            exec_engine_ = llvm::EngineBuilder(&module_).setErrorStr(&err).create();
-
-            if (!exec_engine_) {
-                std::cerr << "coult not create execution engine: " << err << std::endl;
-                exit(1);
-            }
-
-            module_.setDataLayout(exec_engine_->getDataLayout()->getStringRepresentation());
 
             pass_mgr_.add(llvm::createBasicAliasAnalysisPass());
             pass_mgr_.add(llvm::createInstructionCombiningPass());
@@ -185,6 +172,24 @@ namespace kaleidoscope
         }
     };
 
+    class seq_node : public expr_node
+    {
+        std::vector<std::unique_ptr<expr_node>> exprs_;
+    public:
+        void add_expr(std::unique_ptr<expr_node> expr)
+        {
+            exprs_.push_back(std::move(expr));
+        }
+
+        llvm::Value *codegen(codegen_ctx &ctx)
+        {
+            // XXX not necessary to keep all values, just the last
+            std::vector<llvm::Value *> values(exprs_.size());
+            std::transform(exprs_.begin(), exprs_.end(), values.begin(), [&](auto &&expr) { return expr->codegen(ctx); });
+            return values.back();
+        }
+    };
+
     class def_node
     {
     public:
@@ -289,6 +294,7 @@ namespace kaleidoscope
         lcurly,
         rcurly,
         comma,
+        semicolon
     };
 
     std::string to_string(token tok)
@@ -316,6 +322,8 @@ namespace kaleidoscope
                 return "}";
             case token::comma:
                 return ",";
+            case token::semicolon:
+                return ";";
         }
         return "unknown";
     }
@@ -352,6 +360,9 @@ namespace kaleidoscope
             in.get();
         } else if (in.peek() == ',') {
             tok = token::comma;
+            in.get();
+        } else if (in.peek() == ';') {
+            tok = token::semicolon;
             in.get();
         } else if (isdigit(in.peek())) {
             read_while(in, isdigit);
@@ -415,7 +426,7 @@ namespace kaleidoscope
         {
             auto proto = parse_prototype();
             expect(token::lcurly);
-            auto body = parse_expr();
+            auto body = parse_expr_seq();
             expect(token::rcurly);
             return std::make_unique<function_node>(std::move(proto), std::move(body));
         }
@@ -444,6 +455,18 @@ namespace kaleidoscope
             expect(token::rpar);
 
             return std::make_unique<prototype_node>(name, std::move(params));
+        }
+
+        // expr_seq = expr { ";" expr }
+        std::unique_ptr<expr_node> parse_expr_seq()
+        {
+            auto node = std::make_unique<seq_node>();
+            node->add_expr(std::move(parse_expr()));
+            while (curr_tok_ == token::semicolon) {
+                move_next();
+                node->add_expr(std::move(parse_expr()));
+            }
+            return std::move(node);
         }
 
         // expr = factor
@@ -520,48 +543,6 @@ namespace kaleidoscope
     };
 }
 
-// bool prompt(const std::string &prompt, std::string &input)
-// {
-//     std::cout << prompt;
-//     return static_cast<bool>(std::getline(std::cin, input));
-// }
-
-// void handle_toplevel(kaleidoscope::codegen_ctx &ctx, std::unique_ptr<kaleidoscope::def_node> node)
-// {
-//     auto f = node->codegen(ctx);
-
-//     llvm::verifyFunction(*f);
-//     ctx.pass_mgr_.run(*f);
-
-//     f->dump();
-// }
-
-// void handle_toplevel(kaleidoscope::codegen_ctx &ctx, std::unique_ptr<kaleidoscope::expr_node> node)
-// {
-//     auto f = ctx.module_.getFunction("toplevel_wrapper");
-//     if (f)
-//         f->eraseFromParent();
-
-//     auto double_ty = llvm::Type::getDoubleTy(llvm::getGlobalContext());
-//     std::vector<llvm::Type *> param_tys;
-//     auto fun_ty = llvm::FunctionType::get(double_ty, param_tys, false);
-//     f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, "toplevel_wrapper", &ctx.module_);
-
-//     auto block = llvm::BasicBlock::Create(llvm::getGlobalContext(), "entry", f);
-//     ctx.builder_.SetInsertPoint(block);
-
-//     auto ret_val = node->codegen(ctx);
-//     ctx.builder_.CreateRet(ret_val);
-
-//     llvm::verifyFunction(*f);
-//     ctx.pass_mgr_.run(*f);
-
-//     auto fptr = ctx.exec_engine_->getPointerToFunction(f);
-//     double (*fp)() = (double (*)())(intptr_t)fptr;
-//     auto val = fp();
-//     std::cout << "- " << val << std::endl;
-// }
-
 int main(int argc, const char *argv[])
 {
     kaleidoscope::codegen_ctx ctx{"kaleidoscope"};
@@ -576,28 +557,6 @@ int main(int argc, const char *argv[])
     std::string err;
     llvm::raw_fd_ostream os("out.bc", err);
     llvm::WriteBitcodeToFile(&ctx.module_, os);
-
-    // std::string input;
-    // while (prompt("* ", input)) {
-    //     if (input == "#dump") {
-    //         std::string err;
-    //         llvm::raw_fd_ostream os("out.bc", err);
-    //         llvm::WriteBitcodeToFile(&ctx.module_, os);
-    //     } else {
-    //         std::istringstream s{input};
-    //         kaleidoscope::parser p{s};
-
-    //         p.move_next();
-
-    //         if (p.curr_tok_ == kaleidoscope::token::kw_extern || p.curr_tok_ == kaleidoscope::token::kw_fun)
-    //             handle_toplevel(ctx, p.parse());
-    //         else
-    //             handle_toplevel(ctx, p.parse_expr());
-    //     }
-
-    // }
-
-    // ctx.module_.dump();
 
     return 0;
 }
