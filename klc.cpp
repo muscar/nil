@@ -7,11 +7,18 @@
 #include <algorithm>
 #include <cctype>
 
+#include <llvm/Analysis/Passes.h>
 #include <llvm/Analysis/Verifier.h>
+#include <llvm/ExecutionEngine/ExecutionEngine.h>
+#include <llvm/ExecutionEngine/JIT.h>
+#include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/PassManager.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/Transforms/Scalar.h>
 
 namespace kaleidoscope
 {
@@ -19,13 +26,38 @@ namespace kaleidoscope
 
     struct codegen_ctx
     {
+        llvm::ExecutionEngine *exec_engine_;
         llvm::Module module_;
+        llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
         std::map<std::string, llvm::Value *> symtab_;
 
         codegen_ctx(const std::string &name)
-        : module_{name, llvm::getGlobalContext()}, builder_{llvm::getGlobalContext()}
+        : module_{name, llvm::getGlobalContext()}, pass_mgr_{&module_}, builder_{llvm::getGlobalContext()}
         { }
+
+        void init()
+        {
+            llvm::InitializeNativeTarget();
+
+            std::string err;
+            exec_engine_ = llvm::EngineBuilder(&module_).setErrorStr(&err).create();
+
+            if (!exec_engine_) {
+                std::cerr << "coult not create execution engine: " << err << std::endl;
+                exit(1);
+            }
+
+            module_.setDataLayout(exec_engine_->getDataLayout()->getStringRepresentation());
+
+            pass_mgr_.add(llvm::createBasicAliasAnalysisPass());
+            pass_mgr_.add(llvm::createInstructionCombiningPass());
+            pass_mgr_.add(llvm::createReassociatePass());
+            pass_mgr_.add(llvm::createGVNPass());
+            pass_mgr_.add(llvm::createCFGSimplificationPass());
+
+            pass_mgr_.doInitialization();
+        }
     };
 
     // AST
@@ -150,7 +182,15 @@ namespace kaleidoscope
         }
     };
 
-    class prototype_node
+    class def_node
+    {
+    public:
+        virtual ~def_node() { }
+
+        virtual llvm::Function *codegen(codegen_ctx &ctx) = 0;
+    };
+
+    class prototype_node : public def_node
     {
         std::string name_;
         std::vector<std::string> params_;
@@ -187,7 +227,7 @@ namespace kaleidoscope
         }
     };
 
-    class function_node
+    class function_node : public def_node
     {
         std::unique_ptr<prototype_node> proto_;
         std::unique_ptr<expr_node> body_;
@@ -207,8 +247,6 @@ namespace kaleidoscope
 
             auto ret_val = body_->codegen(ctx);
             ctx.builder_.CreateRet(ret_val);
-
-            llvm::verifyFunction(*f);
 
             return f;
         }
@@ -314,15 +352,29 @@ namespace kaleidoscope
 
     class parser
     {
+    public:
         token curr_tok_;
         std::istringstream &in_;
+
     public:
         parser(std::istringstream &in) : in_(in) { }
 
-        std::unique_ptr<function_node> parse()
+        std::unique_ptr<def_node> parse()
         {
-            move_next();
-            return parse_function();
+            // move_next();
+            return parse_def();
+        }
+
+        std::unique_ptr<def_node> parse_def()
+        {
+            switch (curr_tok_) {
+                case token::kw_extern:
+                    move_next();
+                    return parse_prototype();
+                case token::kw_fun:
+                    return parse_function();
+            }
+            throw std::domain_error("expecting a definition at the toplevel");
         }
 
         // fun_decl = fun_proto fun_body
@@ -417,7 +469,7 @@ namespace kaleidoscope
             return std::make_unique<call_node>(name, std::move(args));
         }
 
-    private:
+    // private:
         void move_next()
         {
             curr_tok_ = next(in_);
@@ -442,20 +494,56 @@ bool prompt(const std::string &prompt, std::string &input)
     return static_cast<bool>(std::getline(std::cin, input));
 }
 
+extern "C"
+double putchard(double d)
+{
+    putchar((char) d);
+    return 0;
+}
+
 int main(int argc, const char *argv[])
 {
     kaleidoscope::codegen_ctx ctx{"kaleidoscope"};
+    ctx.init();
 
     std::string input;
     while (prompt("* ", input)) {
         std::istringstream s{input};
+        // kaleidoscope::parser p{s};
+
+        // auto node = p.parse();
+        // node->codegen(ctx);
+
         kaleidoscope::parser p{s};
 
-        auto node = p.parse();
-        node->codegen(ctx);
+        p.move_next();
 
-        ctx.module_.dump();
+        if (p.curr_tok_ == kaleidoscope::token::kw_extern || p.curr_tok_ == kaleidoscope::token::kw_fun) {
+            auto node = p.parse();
+            auto f = node->codegen(ctx);
+
+            llvm::verifyFunction(*f);
+            ctx.pass_mgr_.run(*f);
+
+            f->dump();
+        } else {
+            auto body = p.parse_expr();
+            auto proto = std::make_unique<kaleidoscope::prototype_node>("", std::vector<std::string>());
+            auto node = std::make_unique<kaleidoscope::function_node>(std::move(proto), std::move(body));
+
+            auto f = node->codegen(ctx);
+
+            llvm::verifyFunction(*f);
+            ctx.pass_mgr_.run(*f);
+
+            auto fptr = ctx.exec_engine_->getPointerToFunction(f);
+            double (*fp)() = (double (*)())(intptr_t)fptr;
+            auto val = fp();
+            std::cout << "- " << val << std::endl;
+        }
     }
+
+    ctx.module_.dump();
 
     return 0;
 }

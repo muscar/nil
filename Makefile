@@ -1,6 +1,6 @@
 CC=clang++
 CXXFLAGS=-std=c++1y -g
-LDFLAGS=$(shell llvm-config-3.4 --cppflags --ldflags --libs core)
+LDFLAGS=$(shell llvm-config-3.4 --cppflags --ldflags --libs core jit native)
 TARGET=klc
 
 all:
