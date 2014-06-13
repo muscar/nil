@@ -6,15 +6,9 @@ TARGET=klc
 all:
 	$(CC) $(CXXFLAGS) $(LDFLAGS) klc.cpp -o $(TARGET)
 
-exe:
-	llc-3.4 -filetype=obj out.bc -o out.o
-	clang -std=c11 -O0 -Wall -Werror -c lib.c
-	clang lib.o out.o -o out
-
-
 clean:
 	rm -f $(TARGET)
-	rm *.bc
-	rm *.o
-	rm *.ll
-	rm out
+	rm -f *.bc
+	rm -f *.o
+	rm -f *.ll
+	rm -f *.out

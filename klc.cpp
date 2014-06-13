@@ -6,6 +6,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <cstdlib>
 #include <cctype>
 
 #include <llvm/Analysis/Passes.h>
@@ -72,7 +73,7 @@ namespace kaleidoscope
             tenv_["int64"] = llvm::Type::getInt64Ty(module_.getContext());
             tenv_["double"] = llvm::Type::getDoubleTy(module_.getContext());
 
-            llvm::InitializeNativeTarget();
+            // llvm::InitializeNativeTarget();
 
             pass_mgr_.add(llvm::createBasicAliasAnalysisPass());
             pass_mgr_.add(llvm::createInstructionCombiningPass());
@@ -764,9 +765,22 @@ namespace kaleidoscope
     };
 }
 
+std::string basename(const std::string& pathname)
+{
+    return std::string(std::find(pathname.rbegin(), pathname.rend(), '/').base(), pathname.end());
+}
+
+std::string remove_extension(const std::string& filename)
+{
+    auto pivot = std::find( filename.rbegin(), filename.rend(), '.');
+    return pivot == filename.rend() ? filename : std::string(filename.begin(), pivot.base() - 1);
+}
+
 int main(int argc, const char *argv[])
 {
-    kaleidoscope::codegen_ctx ctx{"kaleidoscope"};
+    auto module_name = remove_extension(basename(argv[1]));
+
+    kaleidoscope::codegen_ctx ctx{module_name};
     ctx.init();
 
     std::ifstream in(argv[1]);
@@ -778,8 +792,17 @@ int main(int argc, const char *argv[])
     ctx.module_.dump();
 
     std::string err;
-    llvm::raw_fd_ostream os("out.bc", err);
+    llvm::raw_fd_ostream os((module_name + ".bc").c_str(), err);
     llvm::WriteBitcodeToFile(&ctx.module_, os);
+    os.close();
+
+    auto bc_file_name = module_name + ".bc";
+    auto obj_file_name = module_name + ".o";
+    auto exe_file_name = module_name + ".out";
+
+    system(("llc-3.4 -filetype=obj " + bc_file_name + " -o " + obj_file_name).c_str());
+    system("clang -std=c11 -O0 -Wall -Werror -c lib.c");
+    system(("clang lib.o " + obj_file_name + " -o " + exe_file_name).c_str());
 
     return 0;
 }
