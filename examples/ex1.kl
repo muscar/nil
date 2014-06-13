@@ -1,18 +1,20 @@
-extern fun putchard(c: double): double
+extern fun println(): int32
+extern fun print_int(n: int32): int32
 
-fun main(): double {
-  putchard(104);
-  putchard(101);
-  putchard(108);
-  putchard(108);
-  putchard(111);
-  putchard(32);
-  putchard(119);
-  putchard(111);
-  putchard(114);
-  putchard(108);
-  putchard(100);
-  putchard(33);
-  putchard(10);
-  0
+struct point {
+    x: int32;
+    y: int32
+}
+
+fun fst(p: point): int32 {
+    p.x
+}
+
+fun snd(p: point): int32 {
+    p.y
+}
+
+fun main(): int32 {
+    print_int(fst(make_point(10, 20)));
+    0
 }

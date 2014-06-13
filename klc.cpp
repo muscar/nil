@@ -23,6 +23,32 @@
 
 namespace kaleidoscope
 {
+    // Semantic
+
+    class symbol
+    {
+        llvm::Value *val_;
+        unsigned int idx_ = 0;
+
+    public:
+        symbol(llvm::Value *val, unsigned int idx) : val_(val), idx_(idx) { }
+
+        llvm::Value *value() const
+        {
+            return val_;
+        }
+
+        llvm::Type *type() const
+        {
+            return val_->getType();
+        }
+
+        unsigned int index() const
+        {
+            return idx_;
+        }
+    };
+
     // Codegen
 
     struct codegen_ctx
@@ -30,20 +56,21 @@ namespace kaleidoscope
         llvm::Module module_;
         llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
-        std::map<std::string, llvm::Value *> symtab_;
+        std::map<std::string, std::unique_ptr<symbol>> symtab_;
+        std::map<std::string, std::unique_ptr<symbol>> fieldtab_;
         std::map<std::string, llvm::Type *> tenv_;
 
         codegen_ctx(const std::string &name)
-        : module_{name, llvm::getGlobalContext()}, pass_mgr_{&module_}, builder_{llvm::getGlobalContext()}
+        : module_{name, llvm::getGlobalContext()}, pass_mgr_{&module_}, builder_{module_.getContext()}
         { }
 
         void init()
         {
-            tenv_["int8"] = llvm::Type::getInt8Ty(llvm::getGlobalContext());
-            tenv_["int16"] = llvm::Type::getInt16Ty(llvm::getGlobalContext());
-            tenv_["int32"] = llvm::Type::getInt32Ty(llvm::getGlobalContext());
-            tenv_["int64"] = llvm::Type::getInt64Ty(llvm::getGlobalContext());
-            tenv_["double"] = llvm::Type::getDoubleTy(llvm::getGlobalContext());
+            tenv_["int8"] = llvm::Type::getInt8Ty(module_.getContext());
+            tenv_["int16"] = llvm::Type::getInt16Ty(module_.getContext());
+            tenv_["int32"] = llvm::Type::getInt32Ty(module_.getContext());
+            tenv_["int64"] = llvm::Type::getInt64Ty(module_.getContext());
+            tenv_["double"] = llvm::Type::getDoubleTy(module_.getContext());
 
             llvm::InitializeNativeTarget();
 
@@ -54,6 +81,13 @@ namespace kaleidoscope
             pass_mgr_.add(llvm::createCFGSimplificationPass());
 
             pass_mgr_.doInitialization();
+        }
+
+        void enter_scope() { }
+
+        void exit_scope()
+        {
+            symtab_.clear();
         }
     };
 
@@ -79,18 +113,18 @@ namespace kaleidoscope
 
     class number_node : public expr_node
     {
-        double value_;
+        int value_;
     public:
-        number_node(double value) : value_(value) { }
+        number_node(int value) : value_(value) { }
 
-        double value() const
+        int value() const
         {
             return value_;
         }
 
         llvm::Value *codegen(codegen_ctx &ctx)
         {
-            return llvm::ConstantFP::get(llvm::getGlobalContext(), llvm::APFloat(value_));
+            return llvm::ConstantInt::get(ctx.module_.getContext(), llvm::APInt(32, value_));
         }
     };
 
@@ -110,7 +144,27 @@ namespace kaleidoscope
             auto it = ctx.symtab_.find(name_);
             if (it == ctx.symtab_.end())
                 throw std::domain_error("unbound variable");
-            return it->second;
+            return it->second->value();
+        }
+    };
+
+    class field_access_node : public expr_node
+    {
+        std::unique_ptr<expr_node> target_;
+        std::string field_;
+    public:
+        field_access_node(std::unique_ptr<expr_node> target, std::string field)
+        : target_(std::move(target)), field_(field)
+        { }
+
+        llvm::Value *codegen(codegen_ctx &ctx)
+        {
+            auto name = "point." + field_;
+            auto it = ctx.fieldtab_.find(name);
+            if (it == ctx.fieldtab_.end())
+                throw std::domain_error("unbound field");
+            auto field_ptr = ctx.builder_.CreateStructGEP(target_->codegen(ctx), it->second->index());
+            return ctx.builder_.CreateLoad(field_ptr);
         }
     };
 
@@ -180,10 +234,21 @@ namespace kaleidoscope
             auto f = ctx.module_.getFunction(target_);
             if (!f)
                 throw std::domain_error("unknown function");
-            if (f->arg_size() != args_.size())
-                throw std::domain_error("argument count mismatch");
-            std::vector<llvm::Value *> argvs(args_.size());
-            std::transform(args_.begin(), args_.end(), argvs.begin(), [&](auto &&expr) { return expr->codegen(ctx); });
+            // if (f->arg_size() != args_.size())
+            //     throw std::domain_error("argument count mismatch");
+            auto has_hidden_param = f->arg_size() != args_.size();
+
+            std::vector<llvm::Value *> argvs;
+            auto arg_it = args_.begin();
+            for (auto param_it = f->arg_begin(); param_it != f->arg_end(); ++param_it) {
+                auto param_ty = param_it->getType();
+                if (param_ty->isPointerTy() && has_hidden_param) {
+                    argvs.push_back(ctx.builder_.CreateAlloca(static_cast<llvm::PointerType *>(param_ty)->getElementType()));
+                } else {
+                    const std::unique_ptr<expr_node> &expr = *arg_it++;
+                    argvs.push_back(expr->codegen(ctx));
+                }
+            }
 
             return ctx.builder_.CreateCall(f, argvs, "calltmp");
         }
@@ -212,23 +277,62 @@ namespace kaleidoscope
     public:
         virtual ~def_node() { }
 
-        // XXX This is too restrictive, e.g. type defs don't return functions
+        // XXX This is too restrictive, e.g. type defs don't return Function *
         virtual llvm::Function *codegen(codegen_ctx &ctx) = 0;
     };
 
     class struct_node : public def_node
     {
         std::string name_;
-        std::vector<std::string> fields_;
+        std::vector<std::pair<std::string, std::string>> fields_;
     public:
-        struct_node(std::string name, std::vector<std::string> fields)
+        struct_node(std::string name, std::vector<std::pair<std::string, std::string>> fields)
         : name_(name), fields_(fields)
         { }
 
         llvm::Function *codegen(codegen_ctx &ctx)
         {
+            std::vector<llvm::Type *> field_tys(fields_.size());
+            std::transform(fields_.begin(), fields_.end(), field_tys.begin(), [&](auto field) { return resolve_type(ctx, field.second); });
+            auto struct_ty = llvm::StructType::create(ctx.module_.getContext(), field_tys, "struct." + name_);
+            ctx.tenv_[name_] = struct_ty;
 
-            return nullptr;
+            auto idx = 0;
+            for (auto &&field : fields_) {
+                auto name = name_ + "." + field.first;
+                ctx.fieldtab_[name] = std::make_unique<symbol>(nullptr, idx++);
+            }
+
+            // ctor
+
+            auto struct_ty_ptr = llvm::PointerType::getUnqual(struct_ty);
+            field_tys.insert(field_tys.begin(), struct_ty_ptr);
+
+            auto fun_ty = llvm::FunctionType::get(struct_ty_ptr, field_tys, false);
+            auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, "make_" + name_, &ctx.module_);
+
+            // ctx.enter_scope();
+
+            auto block = llvm::BasicBlock::Create(ctx.module_.getContext(), "entry", f);
+            ctx.builder_.SetInsertPoint(block);
+
+            auto ret_val = f->arg_begin();
+
+            idx = 0;
+            auto iter = f->arg_begin();
+            while (++iter != f->arg_end()) {
+                auto field_ptr = ctx.builder_.CreateStructGEP(ret_val, idx++);
+                ctx.builder_.CreateStore(iter, field_ptr);
+            }
+
+            ctx.builder_.CreateRet(ret_val);
+
+            llvm::verifyFunction(*f);
+            ctx.pass_mgr_.run(*f);
+
+            // ctx.exit_scope();
+
+            return f;
         }
     };
 
@@ -245,9 +349,17 @@ namespace kaleidoscope
         llvm::Function *codegen(codegen_ctx &ctx)
         {
             std::vector<llvm::Type *> param_tys(params_.size());
-            std::transform(params_.begin(), params_.end(), param_tys.begin(), [&](auto param) { return resolve_type(ctx, param.second); });
+            std::transform(params_.begin(), params_.end(), param_tys.begin(), [&](auto param) {
+                auto ty = resolve_type(ctx, param.second);
+                if (ty->isAggregateType())
+                    ty = llvm::PointerType::getUnqual(ty);
+                return ty;
+            });
 
-            auto fun_ty = llvm::FunctionType::get(resolve_type(ctx, ty_annot_), param_tys, false);
+            auto ret_ty = resolve_type(ctx, ty_annot_);
+            if (ret_ty->isAggregateType())
+                ret_ty = llvm::PointerType::getUnqual(ret_ty);
+            auto fun_ty = llvm::FunctionType::get(ret_ty, param_tys, false);
             auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, name_, &ctx.module_);
             
             if (f->getName() != name_) {
@@ -265,7 +377,11 @@ namespace kaleidoscope
             for (auto iter = f->arg_begin(); idx != params_.size(); ++iter, ++idx) {
                 auto name = params_[idx].first;
                 iter->setName(name);
-                ctx.symtab_[name] = iter;
+                if (iter->getType()->isPointerTy()) {
+                    llvm::AttributeSet attrs;
+                    iter->addAttr(attrs.addAttribute(ctx.module_.getContext(), 0, llvm::Attribute::ByVal));
+                }
+                ctx.symtab_[name] = std::make_unique<symbol>(iter, idx);
             }
 
             return f;
@@ -284,10 +400,11 @@ namespace kaleidoscope
 
         llvm::Function *codegen(codegen_ctx &ctx)
         {
-            ctx.symtab_.clear();
+            ctx.enter_scope();
+
             auto f = proto_->codegen(ctx);
 
-            auto block = llvm::BasicBlock::Create(llvm::getGlobalContext(), "entry", f);
+            auto block = llvm::BasicBlock::Create(ctx.module_.getContext(), "entry", f);
             ctx.builder_.SetInsertPoint(block);
 
             auto ret_val = body_->codegen(ctx);
@@ -295,6 +412,8 @@ namespace kaleidoscope
 
             llvm::verifyFunction(*f);
             ctx.pass_mgr_.run(*f);
+
+            ctx.exit_scope();
 
             return f;
         }
@@ -311,9 +430,8 @@ namespace kaleidoscope
 
         void codegen(codegen_ctx &ctx)
         {
-            for (auto &&def : defs_) {
+            for (auto &&def : defs_)
                 def->codegen(ctx);
-            }
         }
     };
 
@@ -332,6 +450,7 @@ namespace kaleidoscope
         rpar,
         lcurly,
         rcurly,
+        period,
         comma,
         colon,
         semicolon
@@ -362,6 +481,8 @@ namespace kaleidoscope
                 return "{";
             case token::rcurly:
                 return "}";
+            case token::period:
+                return ".";
             case token::comma:
                 return ",";
             case token::colon:
@@ -401,6 +522,9 @@ namespace kaleidoscope
             in.get();
         } else if (in.peek() == '}') {
             tok = token::rcurly;
+            in.get();
+        } else if (in.peek() == '.') {
+            tok = token::period;
             in.get();
         } else if (in.peek() == ',') {
             tok = token::comma;
@@ -451,7 +575,7 @@ namespace kaleidoscope
         std::unique_ptr<module_node> parse_module()
         {
             auto mod = std::make_unique<module_node>();
-            while (curr_tok_ == token::kw_extern || curr_tok_ == token::kw_fun)
+            while (curr_tok_ == token::kw_struct || curr_tok_ == token::kw_extern || curr_tok_ == token::kw_fun)
                 mod->add_def(parse_def());
             return mod;
         }
@@ -460,6 +584,8 @@ namespace kaleidoscope
         std::unique_ptr<def_node> parse_def()
         {
             switch (curr_tok_) {
+                case token::kw_struct:
+                    return parse_struct();
                 case token::kw_extern:
                     move_next();
                     return parse_prototype();
@@ -467,6 +593,27 @@ namespace kaleidoscope
                     return parse_function();
             }
             throw std::domain_error("expecting a definition at the toplevel");
+        }
+
+        // struct_decl = "struct" ident "{" annotated_ident { ";" annotated_ident } "}"
+        std::unique_ptr<struct_node> parse_struct()
+        {
+            expect(token::kw_struct);
+            auto name = lexeme;
+            move_next();
+            std::vector<std::pair<std::string, std::string>> fields;
+
+            expect(token::lcurly);
+
+            fields.push_back(parse_annotated_ident());
+            while (curr_tok_ == token::semicolon) {
+                move_next();
+                fields.push_back(parse_annotated_ident());
+            }
+
+            expect(token::rcurly);
+
+            return std::make_unique<struct_node>(name, std::move(fields));
         }
 
         // fun_decl = fun_proto fun_body
@@ -543,7 +690,7 @@ namespace kaleidoscope
             switch (tok) {
                 case token::num:
                 {
-                    auto value = std::stod(lexeme);
+                    auto value = std::stoi(lexeme);
                     move_next();
                     return std::make_unique<number_node>(value);
                 }
@@ -566,23 +713,36 @@ namespace kaleidoscope
             auto name = lexeme;
             move_next();
 
-            if (curr_tok_ != token::lpar)
-                return std::make_unique<var_node>(name);
-
-            move_next();
-            std::vector<std::unique_ptr<expr_node>> args;
-
-            if (curr_tok_ != token::rpar) {
-                args.push_back(parse_expr());
-                while (curr_tok_ == token::comma) {
+            switch (curr_tok_) {
+                case token::lpar:
+                {
                     move_next();
-                    args.push_back(parse_expr());
+                    std::vector<std::unique_ptr<expr_node>> args;
+
+                    if (curr_tok_ != token::rpar) {
+                        args.push_back(parse_expr());
+                        while (curr_tok_ == token::comma) {
+                            move_next();
+                            args.push_back(parse_expr());
+                        }
+                    }
+
+                    expect(token::rpar);
+
+                    return std::make_unique<call_node>(name, std::move(args));
                 }
+                break;
+                case token::period:
+                {
+                    move_next();
+                    auto field_name = lexeme;
+                    move_next();
+                    return std::make_unique<field_access_node>(std::make_unique<var_node>(name), field_name);
+                }
+                break;
             }
 
-            expect(token::rpar);
-
-            return std::make_unique<call_node>(name, std::move(args));
+            return std::make_unique<var_node>(name);
         }
 
     private:
@@ -614,6 +774,8 @@ int main(int argc, const char *argv[])
 
     auto node = p.parse();
     node->codegen(ctx);
+
+    ctx.module_.dump();
 
     std::string err;
     llvm::raw_fd_ostream os("out.bc", err);
