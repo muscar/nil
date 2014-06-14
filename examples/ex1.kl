@@ -15,6 +15,6 @@ fun snd(p: point): int32 {
 }
 
 fun main(): int32 {
-    print_int(snd(make_point(10, 20)));
+    print_int(snd(make_point(13, 42)));
     0
 }

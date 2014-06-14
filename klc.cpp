@@ -24,15 +24,28 @@
 
 namespace kaleidoscope
 {
+    // Utils
+
+    auto begin(llvm::Function *f) -> decltype(f->arg_begin())
+    {
+        return f->arg_begin();
+    }
+
+    auto end(llvm::Function *f) -> decltype(f->arg_end())
+    {
+        return f->arg_end();
+    }
+
     // Semantic
 
     class symbol
     {
         llvm::Value *val_;
-        unsigned int idx_ = 0;
-
+        llvm::Type *type_;
     public:
-        symbol(llvm::Value *val, unsigned int idx) : val_(val), idx_(idx) { }
+        symbol(llvm::Value *val, llvm::Type *type) : val_(val), type_(type) { }
+
+        virtual ~symbol() { }
 
         llvm::Value *value() const
         {
@@ -41,8 +54,27 @@ namespace kaleidoscope
 
         llvm::Type *type() const
         {
-            return val_->getType();
+            return type_;
         }
+    };
+
+    class param_sym : public symbol
+    {
+        unsigned int idx_ = 0;
+    public:
+        param_sym(llvm::Value *val, llvm::Type *type, unsigned int idx) : symbol(val, type), idx_(idx) { }
+
+        unsigned int index() const
+        {
+            return idx_;
+        }
+    };
+
+    class field_sym : public symbol
+    {
+        unsigned int idx_ = 0;
+    public:
+        field_sym(llvm::Type *type, unsigned int idx) : symbol(nullptr, type), idx_(idx) { }
 
         unsigned int index() const
         {
@@ -58,7 +90,7 @@ namespace kaleidoscope
         llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
         std::map<std::string, std::unique_ptr<symbol>> symtab_;
-        std::map<std::string, std::unique_ptr<symbol>> fieldtab_;
+        std::map<std::string, std::unique_ptr<field_sym>> fieldtab_;
         std::map<std::string, llvm::Type *> tenv_;
 
         codegen_ctx(const std::string &name)
@@ -240,8 +272,8 @@ namespace kaleidoscope
             auto has_hidden_param = f->arg_size() != args_.size();
 
             std::vector<llvm::Value *> argvs;
-            auto arg_it = args_.begin();
-            for (auto param_it = f->arg_begin(); param_it != f->arg_end(); ++param_it) {
+            auto arg_it = begin(args_);
+            for (auto param_it = begin(f); param_it != end(f); ++param_it) {
                 auto param_ty = param_it->getType();
                 if (param_ty->isPointerTy() && has_hidden_param) {
                     argvs.push_back(ctx.builder_.CreateAlloca(static_cast<llvm::PointerType *>(param_ty)->getElementType()));
@@ -268,7 +300,7 @@ namespace kaleidoscope
         {
             // XXX not necessary to keep all values, just the last
             std::vector<llvm::Value *> values(exprs_.size());
-            std::transform(exprs_.begin(), exprs_.end(), values.begin(), [&](auto &&expr) { return expr->codegen(ctx); });
+            std::transform(begin(exprs_), end(exprs_), begin(values), [&](auto &&expr) { return expr->codegen(ctx); });
             return values.back();
         }
     };
@@ -294,20 +326,21 @@ namespace kaleidoscope
         llvm::Function *codegen(codegen_ctx &ctx)
         {
             std::vector<llvm::Type *> field_tys(fields_.size());
-            std::transform(fields_.begin(), fields_.end(), field_tys.begin(), [&](auto field) { return resolve_type(ctx, field.second); });
+            std::transform(begin(fields_), end(fields_), begin(field_tys), [&](auto field) { return resolve_type(ctx, field.second); });
             auto struct_ty = llvm::StructType::create(ctx.module_.getContext(), field_tys, "struct." + name_);
             ctx.tenv_[name_] = struct_ty;
 
             auto idx = 0;
             for (auto &&field : fields_) {
                 auto name = name_ + "." + field.first;
-                ctx.fieldtab_[name] = std::make_unique<symbol>(nullptr, idx++);
+                ctx.fieldtab_[name] = std::make_unique<field_sym>(field_tys[idx], idx);
+                idx++;
             }
 
             // ctor
 
             auto struct_ty_ptr = llvm::PointerType::getUnqual(struct_ty);
-            field_tys.insert(field_tys.begin(), struct_ty_ptr);
+            field_tys.insert(begin(field_tys), struct_ty_ptr);
 
             auto fun_ty = llvm::FunctionType::get(struct_ty_ptr, field_tys, false);
             auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, "make_" + name_, &ctx.module_);
@@ -317,11 +350,11 @@ namespace kaleidoscope
             auto block = llvm::BasicBlock::Create(ctx.module_.getContext(), "entry", f);
             ctx.builder_.SetInsertPoint(block);
 
-            auto ret_val = f->arg_begin();
+            auto ret_val = begin(f);
 
             idx = 0;
-            auto iter = f->arg_begin();
-            while (++iter != f->arg_end()) {
+            auto iter = begin(f);
+            while (++iter != end(f)) {
                 auto field_ptr = ctx.builder_.CreateStructGEP(ret_val, idx++);
                 ctx.builder_.CreateStore(iter, field_ptr);
             }
@@ -350,7 +383,7 @@ namespace kaleidoscope
         llvm::Function *codegen(codegen_ctx &ctx)
         {
             std::vector<llvm::Type *> param_tys(params_.size());
-            std::transform(params_.begin(), params_.end(), param_tys.begin(), [&](auto param) {
+            std::transform(begin(params_), end(params_), begin(param_tys), [&](auto param) {
                 auto ty = resolve_type(ctx, param.second);
                 if (ty->isAggregateType())
                     ty = llvm::PointerType::getUnqual(ty);
@@ -374,15 +407,15 @@ namespace kaleidoscope
             if (f->arg_size() != params_.size())
                 throw std::domain_error("function redefinition with different number of params");
 
-            auto idx = 0;
-            for (auto iter = f->arg_begin(); idx != params_.size(); ++iter, ++idx) {
+            unsigned idx = 0;
+            for (auto iter = begin(f); iter != end(f); ++iter, ++idx) {
                 auto name = params_[idx].first;
                 iter->setName(name);
                 if (iter->getType()->isPointerTy()) {
                     llvm::AttributeSet attrs;
                     iter->addAttr(attrs.addAttribute(ctx.module_.getContext(), 0, llvm::Attribute::ByVal));
                 }
-                ctx.symtab_[name] = std::make_unique<symbol>(iter, idx);
+                ctx.symtab_[name] = std::make_unique<param_sym>(iter, param_tys[idx], idx);
             }
 
             return f;
@@ -767,13 +800,13 @@ namespace kaleidoscope
 
 std::string basename(const std::string& pathname)
 {
-    return std::string(std::find(pathname.rbegin(), pathname.rend(), '/').base(), pathname.end());
+    return std::string(std::find(rbegin(pathname), rend(pathname), '/').base(), end(pathname));
 }
 
 std::string remove_extension(const std::string& filename)
 {
-    auto pivot = std::find( filename.rbegin(), filename.rend(), '.');
-    return pivot == filename.rend() ? filename : std::string(filename.begin(), pivot.base() - 1);
+    auto pivot = std::find(rbegin(filename), rend(filename), '.');
+    return pivot == filename.rend() ? filename : std::string(begin(filename), pivot.base() - 1);
 }
 
 int main(int argc, const char *argv[])
@@ -783,7 +816,7 @@ int main(int argc, const char *argv[])
     kaleidoscope::codegen_ctx ctx{module_name};
     ctx.init();
 
-    std::ifstream in(argv[1]);
+    std::ifstream in{argv[1]};
     kaleidoscope::parser p{in};
 
     auto node = p.parse();
@@ -801,7 +834,7 @@ int main(int argc, const char *argv[])
     auto exe_file_name = module_name + ".out";
 
     system(("llc-3.4 -filetype=obj " + bc_file_name + " -o " + obj_file_name).c_str());
-    system("clang -std=c11 -O0 -Wall -Werror -c lib.c");
+    system("clang -std=c11 -O1 -Wall -Werror -c lib.c");
     system(("clang lib.o " + obj_file_name + " -o " + exe_file_name).c_str());
 
     return 0;
