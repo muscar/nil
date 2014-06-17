@@ -3,20 +3,20 @@ extern fun narrow(n: int32): int16
 extern fun print_int16(n: int16): int16
 extern fun print_int32(n: int32): int32
 
-struct point {
+struct Point {
     x: int32;
     y: int16
 }
 
-fun fst(p: point): int32 {
+fun fst(p: Point): int32 {
     p.x
 }
 
-fun snd(p: point): int16 {
+fun snd(p: Point): int16 {
     p.y
 }
 
 fun main(): int32 {
-    print_int16(snd(make_point(13, narrow(42))));
+    print_int16(snd(Point(13, narrow(42))));
     0
 }

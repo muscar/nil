@@ -24,18 +24,6 @@
 
 namespace kaleidoscope
 {
-    // Utils
-
-    llvm::Function::arg_iterator begin(llvm::Function *f)
-    {
-        return f->arg_begin();
-    }
-
-    llvm::Function::arg_iterator end(llvm::Function *f)
-    {
-        return f->arg_end();
-    }
-
     // Semantic
 
     class symbol
@@ -130,7 +118,7 @@ namespace kaleidoscope
     {
         auto it = ctx.tenv_.find(name);
         if (it == ctx.tenv_.end())
-            throw std::domain_error("unknown type");
+            throw std::domain_error("unknown type " + name);
         return it->second;
     }
 
@@ -313,7 +301,7 @@ namespace kaleidoscope
 
             std::vector<llvm::Value *> argvs;
             auto arg_it = begin(args_);
-            for (auto param_it = begin(f); param_it != end(f); ++param_it) {
+            for (auto param_it = f->arg_begin(); param_it != f->arg_end(); ++param_it) {
                 auto param_ty = param_it->getType();
                 if (param_ty->isPointerTy() && has_hidden_param) {
                     argvs.push_back(ctx.builder_.CreateAlloca(param_ty->getSequentialElementType()));
@@ -390,9 +378,7 @@ namespace kaleidoscope
                 idx++;
             }
 
-            type_ = struct_ty;
-
-            return struct_ty;
+            return type_ = struct_ty;
         }
 
         llvm::Function *codegen(codegen_ctx &ctx)
@@ -408,18 +394,18 @@ namespace kaleidoscope
                 param_tys.push_back(type_->getStructElementType(i));
 
             auto fun_ty = llvm::FunctionType::get(struct_ty_ptr, param_tys, false);
-            auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, "make_" + name_, &ctx.module_);
+            auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, name_, &ctx.module_);
 
             // ctx.enter_scope();
 
             auto block = llvm::BasicBlock::Create(ctx.module_.getContext(), "entry", f);
             ctx.builder_.SetInsertPoint(block);
 
-            auto ret_val = begin(f);
+            auto ret_val = f->arg_begin();
 
             unsigned idx = 0;
-            auto iter = begin(f);
-            while (++iter != end(f)) {
+            auto iter = f->arg_begin();
+            while (++iter != f->arg_end()) {
                 auto field_ptr = ctx.builder_.CreateStructGEP(ret_val, idx++);
                 ctx.builder_.CreateStore(iter, field_ptr);
             }
@@ -461,13 +447,17 @@ namespace kaleidoscope
                 ret_ty = llvm::PointerType::getUnqual(ret_ty);
 
             type_ = llvm::FunctionType::get(ret_ty, param_tys, false);
+            auto f = llvm::Function::Create(static_cast<llvm::FunctionType *>(type_), llvm::Function::ExternalLinkage, name_, &ctx.module_);
+            ctx.symtab_[name_] = std::make_unique<symbol>(f, type_);
+
             return type_;
         }
 
         llvm::Function *codegen(codegen_ctx &ctx)
         {
             assert(type_ != nullptr && type_->isFunctionTy());
-            auto f = llvm::Function::Create(static_cast<llvm::FunctionType *>(type_), llvm::Function::ExternalLinkage, name_, &ctx.module_);
+            auto f = ctx.module_.getFunction(name_);
+            assert(f != nullptr);
             
             if (f->getName() != name_) {
                 f->eraseFromParent();
@@ -481,7 +471,7 @@ namespace kaleidoscope
                 throw std::domain_error("function redefinition with different number of params");
 
             unsigned idx = 0;
-            for (auto iter = begin(f); iter != end(f); ++iter, ++idx) {
+            for (auto iter = f->arg_begin(); iter != f->arg_end(); ++iter, ++idx) {
                 auto name = params_[idx].first;
                 iter->setName(name);
                 if (iter->getType()->isPointerTy()) {
