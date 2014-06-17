@@ -116,16 +116,12 @@ namespace kaleidoscope
 
     llvm::Value *load(codegen_ctx &ctx, llvm::Value *addr)
     {
-        if (addr->isDereferenceablePointer())
-            return ctx.builder_.CreateLoad(addr);
-        return addr;
+        return ctx.builder_.CreateLoad(addr);
     }
 
     llvm::Value *store(codegen_ctx &ctx, llvm::Value *addr, llvm::Value *value)
     {
-        if (addr->isDereferenceablePointer())
-            return ctx.builder_.CreateStore(value, addr);
-        return addr;
+        return ctx.builder_.CreateStore(value, addr);
     }
 
     // Types
@@ -337,13 +333,14 @@ namespace kaleidoscope
                 throw std::domain_error("unknown function");
             // if (f->arg_size() != args_.size())
             //     throw std::domain_error("argument count mismatch");
-            auto has_hidden_param = f->arg_size() != args_.size();
+
+            auto is_ctor = std::isupper(target_[0]);
 
             std::vector<llvm::Value *> argvs;
             auto arg_it = begin(args_);
             for (auto param_it = f->arg_begin(); param_it != f->arg_end(); ++param_it) {
                 auto param_ty = param_it->getType();
-                if (param_ty->isPointerTy() && has_hidden_param) {
+                if (param_ty->isPointerTy() && is_ctor && param_it == f->arg_begin()) {
                     argvs.push_back(ctx.builder_.CreateAlloca(param_ty->getSequentialElementType()));
                 } else {
                     const std::unique_ptr<expr_node> &expr = *arg_it++;
@@ -407,7 +404,12 @@ namespace kaleidoscope
         llvm::Type *type(codegen_ctx &ctx)
         {
             std::vector<llvm::Type *> field_tys(fields_.size());
-            std::transform(begin(fields_), end(fields_), begin(field_tys), [&](auto field) { return resolve_type(ctx, field.second); });
+            std::transform(begin(fields_), end(fields_), begin(field_tys), [&](auto field) {
+                auto field_ty = resolve_type(ctx, field.second);
+                if (field_ty->isAggregateType())
+                    field_ty = llvm::PointerType::getUnqual(field_ty);
+                return field_ty;
+            });
             auto struct_ty = llvm::StructType::create(ctx.module_.getContext(), field_tys, "struct." + name_);
             ctx.tenv_[name_] = struct_ty;
 
@@ -446,6 +448,10 @@ namespace kaleidoscope
             unsigned idx = 0;
             auto iter = f->arg_begin();
             while (++iter != f->arg_end()) {
+                if (iter->getType()->isPointerTy()) {
+                    llvm::AttributeSet attrs;
+                    iter->addAttr(attrs.addAttribute(ctx.module_.getContext(), 0, llvm::Attribute::ByVal));
+                }
                 auto field_ptr = ctx.builder_.CreateStructGEP(ret_val, idx++);
                 store(ctx, field_ptr, iter);
             }

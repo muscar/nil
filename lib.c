@@ -6,11 +6,6 @@ int println()
     return 0;
 }
 
-int narrow(int n)
-{
-    return n;
-}
-
 int print_int16(int n)
 {
     return printf("%d", n);
