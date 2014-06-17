@@ -77,6 +77,7 @@ namespace kaleidoscope
         llvm::Module module_;
         llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
+        llvm::Function *curr_fun_;
         std::map<std::string, std::unique_ptr<symbol>> symtab_;
         std::map<std::string, std::unique_ptr<field_sym>> fieldtab_;
         std::map<std::string, llvm::Type *> tenv_;
@@ -96,6 +97,7 @@ namespace kaleidoscope
             // llvm::InitializeNativeTarget();
 
             pass_mgr_.add(llvm::createBasicAliasAnalysisPass());
+            pass_mgr_.add(llvm::createPromoteMemoryToRegisterPass());
             pass_mgr_.add(llvm::createInstructionCombiningPass());
             pass_mgr_.add(llvm::createReassociatePass());
             pass_mgr_.add(llvm::createGVNPass());
@@ -111,6 +113,20 @@ namespace kaleidoscope
             symtab_.clear();
         }
     };
+
+    llvm::Value *load(codegen_ctx &ctx, llvm::Value *addr)
+    {
+        if (addr->isDereferenceablePointer())
+            return ctx.builder_.CreateLoad(addr);
+        return addr;
+    }
+
+    llvm::Value *store(codegen_ctx &ctx, llvm::Value *addr, llvm::Value *value)
+    {
+        if (addr->isDereferenceablePointer())
+            return ctx.builder_.CreateStore(value, addr);
+        return addr;
+    }
 
     // Types
 
@@ -183,6 +199,30 @@ namespace kaleidoscope
         }
     };
 
+    class var_decl_node : public expr_node
+    {
+        std::string name_;
+        std::unique_ptr<expr_node> value_;
+    public:
+        var_decl_node(std::string name, std::unique_ptr<expr_node> value) : name_(name), value_(std::move(value)) { }
+
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            return value_->type(ctx);
+        }
+
+        llvm::Value *codegen(codegen_ctx &ctx)
+        {
+            auto value = value_->codegen(ctx);
+            llvm::IRBuilder<> builder(&ctx.curr_fun_->getEntryBlock(), ctx.curr_fun_->getEntryBlock().begin());
+            auto addr = builder.CreateAlloca(value->getType(), 0, name_.c_str());
+            store(ctx, addr, value);
+            ctx.symtab_[name_] = std::make_unique<symbol>(value, value->getType());
+            return addr;
+        }
+
+    };
+
     class field_access_node : public expr_node
     {
         std::unique_ptr<expr_node> target_;
@@ -213,7 +253,7 @@ namespace kaleidoscope
             if (it == ctx.fieldtab_.end())
                 throw std::domain_error("unbound field");
             auto field_ptr = ctx.builder_.CreateStructGEP(target_->codegen(ctx), it->second->index());
-            return ctx.builder_.CreateLoad(field_ptr);
+            return load(ctx, field_ptr);
         }
     };
 
@@ -407,7 +447,7 @@ namespace kaleidoscope
             auto iter = f->arg_begin();
             while (++iter != f->arg_end()) {
                 auto field_ptr = ctx.builder_.CreateStructGEP(ret_val, idx++);
-                ctx.builder_.CreateStore(iter, field_ptr);
+                store(ctx, field_ptr, iter);
             }
 
             ctx.builder_.CreateRet(ret_val);
@@ -505,6 +545,8 @@ namespace kaleidoscope
 
             auto f = proto_->codegen(ctx);
 
+            ctx.curr_fun_ = f;
+
             auto block = llvm::BasicBlock::Create(ctx.module_.getContext(), "entry", f);
             ctx.builder_.SetInsertPoint(block);
 
@@ -513,6 +555,8 @@ namespace kaleidoscope
 
             llvm::verifyFunction(*f);
             ctx.pass_mgr_.run(*f);
+
+            ctx.curr_fun_ = nullptr;
 
             ctx.exit_scope();
 
@@ -553,6 +597,8 @@ namespace kaleidoscope
         kw_struct,
         kw_fun,
         kw_extern,
+        kw_var,
+        eq,
         lpar,
         rpar,
         lcurly,
@@ -576,10 +622,14 @@ namespace kaleidoscope
                 return "fun keyword";
             case token::kw_extern:
                 return "extern keyword";
+            case token::kw_var:
+                return "var keyword";
             case token::ident:
                 return "identifier";
             case token::num:
                 return "number";
+            case token::eq:
+                return "=";
             case token::lpar:
                 return "(";
             case token::rpar:
@@ -618,7 +668,10 @@ namespace kaleidoscope
         lexeme.clear();
         while (isspace(in.peek()))
             in.get();
-        if (in.peek() == '(') {
+        if (in.peek() == '=') {
+            tok = token::eq;
+            in.get();
+        } else if (in.peek() == '(') {
             tok = token::lpar;
             in.get();
         } else if (in.peek() == ')') {
@@ -653,6 +706,8 @@ namespace kaleidoscope
                 tok = token::kw_fun;
             else if (lexeme == "extern")
                 tok = token::kw_extern;
+            else if (lexeme == "var")
+                tok = token::kw_var;
             else
                 tok = token::ident;
         } else {
@@ -784,10 +839,23 @@ namespace kaleidoscope
             return std::move(node);
         }
 
-        // expr = factor
+        // expr = factor | val_decl
         std::unique_ptr<expr_node> parse_expr()
         {
+            if (curr_tok_ == token::kw_var)
+                return parse_var_decl();
             return parse_factor();
+        }
+
+        // var_decl = "var" ident "=" expr
+        std::unique_ptr<expr_node> parse_var_decl()
+        {
+            expect(token::kw_var);
+            auto name = lexeme;
+            expect(token::ident);
+            expect(token::eq);
+            auto value = parse_expr();
+            return std::make_unique<var_decl_node>(name, std::move(value));
         }
 
         // factor = num | ident | call

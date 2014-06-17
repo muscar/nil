@@ -9,7 +9,8 @@ struct Point {
 }
 
 fun fst(p: Point): int32 {
-    p.x
+    var result = p.x;
+    result
 }
 
 fun snd(p: Point): int16 {
