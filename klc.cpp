@@ -234,9 +234,10 @@ namespace kaleidoscope
             if (!target_ty->isStructTy())
                 throw std::domain_error("trying to index a non-struct");
             auto target_ty_name = target_ty->getStructName().str();
-            auto it = ctx.fieldtab_.find(target_ty_name);
+            auto name = target_ty_name + "." + field_;
+            auto it = ctx.fieldtab_.find(name);
             if (it == ctx.fieldtab_.end())
-                throw std::domain_error("unbound field");
+                throw std::domain_error("unbound field " + field_);
             return it->second->type();
         }
 
@@ -247,7 +248,7 @@ namespace kaleidoscope
             auto name = target_ty_name + "." + field_;
             auto it = ctx.fieldtab_.find(name);
             if (it == ctx.fieldtab_.end())
-                throw std::domain_error("unbound field");
+                throw std::domain_error("unbound field " + field_);
             auto field_ptr = ctx.builder_.CreateStructGEP(target_->codegen(ctx), it->second->index());
             return load(ctx, field_ptr);
         }
@@ -894,36 +895,33 @@ namespace kaleidoscope
             auto name = lexeme;
             move_next();
 
-            switch (curr_tok_) {
-                case token::lpar:
-                {
-                    move_next();
-                    std::vector<std::unique_ptr<expr_node>> args;
+            expr_node *result = new var_node(name);
 
-                    if (curr_tok_ != token::rpar) {
-                        args.push_back(parse_expr());
-                        while (curr_tok_ == token::comma) {
-                            move_next();
-                            args.push_back(parse_expr());
-                        }
-                    }
-
-                    expect(token::rpar);
-
-                    return std::make_unique<call_node>(name, std::move(args));
-                }
-                break;
-                case token::period:
-                {
-                    move_next();
-                    auto field_name = lexeme;
-                    move_next();
-                    return std::make_unique<field_access_node>(std::make_unique<var_node>(name), field_name);
-                }
-                break;
+            while (curr_tok_ == token::period ) {
+                move_next();
+                auto field_name = lexeme;
+                move_next();
+                result = new field_access_node(std::unique_ptr<expr_node>(result), field_name);
             }
 
-            return std::make_unique<var_node>(name);
+            if (curr_tok_ == token::lpar) {
+                move_next();
+                std::vector<std::unique_ptr<expr_node>> args;
+
+                if (curr_tok_ != token::rpar) {
+                    args.push_back(parse_expr());
+                    while (curr_tok_ == token::comma) {
+                        move_next();
+                        args.push_back(parse_expr());
+                    }
+                }
+
+                expect(token::rpar);
+
+                return std::make_unique<call_node>(name, std::move(args));
+            }
+
+            return std::unique_ptr<expr_node>(result);
         }
 
     private:

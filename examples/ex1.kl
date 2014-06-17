@@ -29,7 +29,8 @@ fun main(): int32 {
     var l = Line(Point(10, 20), Point(100, 200));
     var p1 = l.p1;
     var p2 = l.p2;
-    print_point(p1);
+    print_int32(l.p1.x);
+    print_int32(l.p1.y);
     println();
     print_point(p2);
     println();
