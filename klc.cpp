@@ -26,12 +26,12 @@ namespace kaleidoscope
 {
     // Utils
 
-    auto begin(llvm::Function *f) -> decltype(f->arg_begin())
+    llvm::Function::arg_iterator begin(llvm::Function *f)
     {
         return f->arg_begin();
     }
 
-    auto end(llvm::Function *f) -> decltype(f->arg_end())
+    llvm::Function::arg_iterator end(llvm::Function *f)
     {
         return f->arg_end();
     }
@@ -141,6 +141,7 @@ namespace kaleidoscope
     public:
         virtual ~expr_node() { }
 
+        virtual llvm::Type *type(codegen_ctx &ctx) = 0;
         virtual llvm::Value *codegen(codegen_ctx &ctx) = 0;
     };
 
@@ -153,6 +154,11 @@ namespace kaleidoscope
         int value() const
         {
             return value_;
+        }
+
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            return resolve_type(ctx, "int32");
         }
 
         llvm::Value *codegen(codegen_ctx &ctx)
@@ -170,6 +176,14 @@ namespace kaleidoscope
         std::string name() const
         {
             return name_;
+        }
+
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            auto it = ctx.symtab_.find(name_);
+            if (it == ctx.symtab_.end())
+                throw std::domain_error("unbound variable");
+            return it->second->type();
         }
 
         llvm::Value *codegen(codegen_ctx &ctx)
@@ -190,9 +204,23 @@ namespace kaleidoscope
         : target_(std::move(target)), field_(field)
         { }
 
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            auto target_ty = target_->type(ctx)->getSequentialElementType();
+            if (!target_ty->isStructTy())
+                throw std::domain_error("trying to index a non-struct");
+            auto target_ty_name = target_ty->getStructName().str();
+            auto it = ctx.fieldtab_.find(target_ty_name);
+            if (it == ctx.fieldtab_.end())
+                throw std::domain_error("unbound field");
+            return it->second->type();
+        }
+
         llvm::Value *codegen(codegen_ctx &ctx)
         {
-            auto name = "point." + field_;
+            auto target_ty = target_->type(ctx)->getSequentialElementType();
+            auto target_ty_name = target_ty->getStructName().str();
+            auto name = target_ty_name + "." + field_;
             auto it = ctx.fieldtab_.find(name);
             if (it == ctx.fieldtab_.end())
                 throw std::domain_error("unbound field");
@@ -224,6 +252,11 @@ namespace kaleidoscope
         const expr_node *rhs() const
         {
             return rhs_.get();
+        }
+
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            return resolve_type(ctx, "int32");
         }
 
         llvm::Value *codegen(codegen_ctx &ctx)
@@ -261,6 +294,13 @@ namespace kaleidoscope
             return args_;
         }
 
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            auto f = ctx.module_.getFunction(target_);
+            if (!f)
+                throw std::domain_error("unknown function");
+            return f->getReturnType();
+        }
 
         llvm::Value *codegen(codegen_ctx &ctx)
         {
@@ -276,7 +316,7 @@ namespace kaleidoscope
             for (auto param_it = begin(f); param_it != end(f); ++param_it) {
                 auto param_ty = param_it->getType();
                 if (param_ty->isPointerTy() && has_hidden_param) {
-                    argvs.push_back(ctx.builder_.CreateAlloca(static_cast<llvm::PointerType *>(param_ty)->getElementType()));
+                    argvs.push_back(ctx.builder_.CreateAlloca(param_ty->getSequentialElementType()));
                 } else {
                     const std::unique_ptr<expr_node> &expr = *arg_it++;
                     argvs.push_back(expr->codegen(ctx));
@@ -296,6 +336,14 @@ namespace kaleidoscope
             exprs_.push_back(std::move(expr));
         }
 
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            // XXX not necessary to keep all values, just the last
+            std::vector<llvm::Type *> types(exprs_.size());
+            std::transform(begin(exprs_), end(exprs_), begin(types), [&](auto &&expr) { return expr->type(ctx); });
+            return types.back();
+        }
+
         llvm::Value *codegen(codegen_ctx &ctx)
         {
             // XXX not necessary to keep all values, just the last
@@ -307,8 +355,13 @@ namespace kaleidoscope
 
     class def_node
     {
+    protected:
+        llvm::Type *type_;
+
     public:
         virtual ~def_node() { }
+
+        virtual llvm::Type *type(codegen_ctx &ctx) = 0;
 
         // XXX This is too restrictive, e.g. type defs don't return Function *
         virtual llvm::Function *codegen(codegen_ctx &ctx) = 0;
@@ -323,7 +376,7 @@ namespace kaleidoscope
         : name_(name), fields_(fields)
         { }
 
-        llvm::Function *codegen(codegen_ctx &ctx)
+        llvm::Type *type(codegen_ctx &ctx)
         {
             std::vector<llvm::Type *> field_tys(fields_.size());
             std::transform(begin(fields_), end(fields_), begin(field_tys), [&](auto field) { return resolve_type(ctx, field.second); });
@@ -332,17 +385,29 @@ namespace kaleidoscope
 
             auto idx = 0;
             for (auto &&field : fields_) {
-                auto name = name_ + "." + field.first;
+                auto name = "struct." +  name_ + "." + field.first;
                 ctx.fieldtab_[name] = std::make_unique<field_sym>(field_tys[idx], idx);
                 idx++;
             }
 
+            type_ = struct_ty;
+
+            return struct_ty;
+        }
+
+        llvm::Function *codegen(codegen_ctx &ctx)
+        {
+            assert(type_ != nullptr);
             // ctor
 
-            auto struct_ty_ptr = llvm::PointerType::getUnqual(struct_ty);
-            field_tys.insert(begin(field_tys), struct_ty_ptr);
+            std::vector<llvm::Type *> param_tys;
+            auto struct_ty_ptr = llvm::PointerType::getUnqual(type_);
+            param_tys.push_back(struct_ty_ptr);
 
-            auto fun_ty = llvm::FunctionType::get(struct_ty_ptr, field_tys, false);
+            for (unsigned i = 0; i < type_->getStructNumElements(); ++i)
+                param_tys.push_back(type_->getStructElementType(i));
+
+            auto fun_ty = llvm::FunctionType::get(struct_ty_ptr, param_tys, false);
             auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, "make_" + name_, &ctx.module_);
 
             // ctx.enter_scope();
@@ -352,7 +417,7 @@ namespace kaleidoscope
 
             auto ret_val = begin(f);
 
-            idx = 0;
+            unsigned idx = 0;
             auto iter = begin(f);
             while (++iter != end(f)) {
                 auto field_ptr = ctx.builder_.CreateStructGEP(ret_val, idx++);
@@ -375,12 +440,13 @@ namespace kaleidoscope
         std::string name_;
         std::vector<std::pair<std::string, std::string>> params_;
         std::string ty_annot_;
+
     public:
         prototype_node(std::string name, std::vector<std::pair<std::string, std::string>> params, std::string ty_annot)
         : name_(name), params_(params), ty_annot_(ty_annot)
         { }
 
-        llvm::Function *codegen(codegen_ctx &ctx)
+        llvm::Type *type(codegen_ctx &ctx)
         {
             std::vector<llvm::Type *> param_tys(params_.size());
             std::transform(begin(params_), end(params_), begin(param_tys), [&](auto param) {
@@ -393,8 +459,15 @@ namespace kaleidoscope
             auto ret_ty = resolve_type(ctx, ty_annot_);
             if (ret_ty->isAggregateType())
                 ret_ty = llvm::PointerType::getUnqual(ret_ty);
-            auto fun_ty = llvm::FunctionType::get(ret_ty, param_tys, false);
-            auto f = llvm::Function::Create(fun_ty, llvm::Function::ExternalLinkage, name_, &ctx.module_);
+
+            type_ = llvm::FunctionType::get(ret_ty, param_tys, false);
+            return type_;
+        }
+
+        llvm::Function *codegen(codegen_ctx &ctx)
+        {
+            assert(type_ != nullptr && type_->isFunctionTy());
+            auto f = llvm::Function::Create(static_cast<llvm::FunctionType *>(type_), llvm::Function::ExternalLinkage, name_, &ctx.module_);
             
             if (f->getName() != name_) {
                 f->eraseFromParent();
@@ -415,7 +488,7 @@ namespace kaleidoscope
                     llvm::AttributeSet attrs;
                     iter->addAttr(attrs.addAttribute(ctx.module_.getContext(), 0, llvm::Attribute::ByVal));
                 }
-                ctx.symtab_[name] = std::make_unique<param_sym>(iter, param_tys[idx], idx);
+                ctx.symtab_[name] = std::make_unique<param_sym>(iter, type_->getFunctionParamType(idx), idx);
             }
 
             return f;
@@ -431,6 +504,10 @@ namespace kaleidoscope
         : proto_(std::move(proto)), body_(std::move(body))
         { }
 
+        llvm::Type *type(codegen_ctx &ctx)
+        {
+            return proto_->type(ctx);
+        }
 
         llvm::Function *codegen(codegen_ctx &ctx)
         {
@@ -460,6 +537,12 @@ namespace kaleidoscope
         void add_def(std::unique_ptr<def_node> def)
         {
             defs_.push_back(std::move(def));
+        }
+
+        void type(codegen_ctx &ctx)
+        {
+            for (auto &&def : defs_)
+                def->type(ctx);
         }
 
         void codegen(codegen_ctx &ctx)
@@ -820,6 +903,7 @@ int main(int argc, const char *argv[])
     kaleidoscope::parser p{in};
 
     auto node = p.parse();
+    node->type(ctx);
     node->codegen(ctx);
 
     ctx.module_.dump();

@@ -6,7 +6,17 @@ int println()
     return 0;
 }
 
-int print_int(int n)
+int narrow(int n)
+{
+    return n;
+}
+
+int print_int16(int n)
+{
+    return printf("%d", n);
+}
+
+int print_int32(int n)
 {
     return printf("%d", n);
 }
