@@ -26,12 +26,45 @@ namespace kaleidoscope
 {
     // Semantic
 
+    template<typename T>
+    class symtab
+    {
+        std::vector<std::unique_ptr<std::map<std::string, std::unique_ptr<T>>>> scopes_;
+    public:
+        void enter_scope()
+        {
+            scopes_.push_back(std::make_unique<std::map<std::string, std::unique_ptr<T>>>());
+        }
+
+        void exit_scope()
+        {
+            scopes_.pop_back();
+        }
+
+        void insert(const std::string &key, std::unique_ptr<T> value)
+        {
+            scopes_.back()->emplace(key, std::move(value));
+        }
+
+        bool lookup(const std::string &key, T &out) const
+        {
+            for (auto &&s : scopes_) {
+                auto it = s->find(key);
+                if (it != s->end()) {
+                    out = *it->second;
+                    return true;
+                }
+            }
+            return false;
+        }
+    };
+
     class symbol
     {
         llvm::Value *val_;
         llvm::Type *type_;
     public:
-        symbol(llvm::Value *val, llvm::Type *type) : val_(val), type_(type) { }
+        symbol(llvm::Value *val = nullptr, llvm::Type *type = nullptr) : val_(val), type_(type) { }
 
         virtual ~symbol() { }
 
@@ -78,7 +111,8 @@ namespace kaleidoscope
         llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
         llvm::Function *curr_fun_;
-        std::map<std::string, std::unique_ptr<symbol>> symtab_;
+
+        symtab<symbol> symtab_;
         std::map<std::string, std::unique_ptr<field_sym>> fieldtab_;
         std::map<std::string, llvm::Type *> tenv_;
 
@@ -88,6 +122,8 @@ namespace kaleidoscope
 
         void init()
         {
+            symtab_.enter_scope();
+
             tenv_["int8"] = llvm::Type::getInt8Ty(module_.getContext());
             tenv_["int16"] = llvm::Type::getInt16Ty(module_.getContext());
             tenv_["int32"] = llvm::Type::getInt32Ty(module_.getContext());
@@ -104,13 +140,6 @@ namespace kaleidoscope
             pass_mgr_.add(llvm::createCFGSimplificationPass());
 
             pass_mgr_.doInitialization();
-        }
-
-        void enter_scope() { }
-
-        void exit_scope()
-        {
-            symtab_.clear();
         }
     };
 
@@ -180,18 +209,17 @@ namespace kaleidoscope
 
         llvm::Type *type(codegen_ctx &ctx)
         {
-            auto it = ctx.symtab_.find(name_);
-            if (it == ctx.symtab_.end())
-                throw std::domain_error("unbound variable");
-            return it->second->type();
+            symbol sym;
+            if (!ctx.symtab_.lookup(name_, sym))
+                throw std::domain_error("unbound variable " + name_);
+            return sym.type();
         }
 
         llvm::Value *codegen(codegen_ctx &ctx)
         {
-            auto it = ctx.symtab_.find(name_);
-            if (it == ctx.symtab_.end())
-                throw std::domain_error("unbound variable");
-            return it->second->value();
+            symbol sym;
+            ctx.symtab_.lookup(name_, sym);
+            return sym.value();
         }
     };
 
@@ -213,7 +241,7 @@ namespace kaleidoscope
             llvm::IRBuilder<> builder(&ctx.curr_fun_->getEntryBlock(), ctx.curr_fun_->getEntryBlock().begin());
             auto addr = builder.CreateAlloca(value->getType(), 0, name_.c_str());
             store(ctx, addr, value);
-            ctx.symtab_[name_] = std::make_unique<symbol>(value, value->getType());
+            ctx.symtab_.insert(name_, std::make_unique<symbol>(value, value->getType()));
             return addr;
         }
 
@@ -302,40 +330,28 @@ namespace kaleidoscope
 
     class call_node : public expr_node
     {
-        std::string target_;
+        std::unique_ptr<expr_node> target_;
         std::vector<std::unique_ptr<expr_node>> args_;
     public:
-        call_node(std::string target, std::vector<std::unique_ptr<expr_node>> args)
-        : target_(target), args_(std::move(args))
+        call_node(std::unique_ptr<expr_node> target, std::vector<std::unique_ptr<expr_node>> args)
+        : target_(std::move(target)), args_(std::move(args))
         { }
-
-        std::string target() const
-        {
-            return target_;
-        }
-
-        const std::vector<std::unique_ptr<expr_node>> &args() const
-        {
-            return args_;
-        }
 
         llvm::Type *type(codegen_ctx &ctx)
         {
-            auto f = ctx.module_.getFunction(target_);
-            if (!f)
-                throw std::domain_error("unknown function");
-            return f->getReturnType();
+            auto fun_ty = target_->type(ctx);
+            if (!fun_ty->isFunctionTy())
+                throw std::domain_error("trying to call a non-function");
+            return llvm::cast<llvm::FunctionType>(fun_ty)->getReturnType();
         }
 
         llvm::Value *codegen(codegen_ctx &ctx)
         {
-            auto f = ctx.module_.getFunction(target_);
-            if (!f)
-                throw std::domain_error("unknown function");
+            auto f = llvm::cast<llvm::Function>(target_->codegen(ctx));
             // if (f->arg_size() != args_.size())
             //     throw std::domain_error("argument count mismatch");
 
-            auto is_ctor = std::isupper(target_[0]);
+            auto is_ctor = std::isupper(f->getName().str()[0]);
 
             std::vector<llvm::Value *> argvs;
             auto arg_it = begin(args_);
@@ -495,7 +511,7 @@ namespace kaleidoscope
 
             type_ = llvm::FunctionType::get(ret_ty, param_tys, false);
             auto f = llvm::Function::Create(static_cast<llvm::FunctionType *>(type_), llvm::Function::ExternalLinkage, name_, &ctx.module_);
-            ctx.symtab_[name_] = std::make_unique<symbol>(f, type_);
+            ctx.symtab_.insert(name_, std::make_unique<symbol>(f, type_));
 
             return type_;
         }
@@ -525,7 +541,7 @@ namespace kaleidoscope
                     llvm::AttributeSet attrs;
                     iter->addAttr(attrs.addAttribute(ctx.module_.getContext(), 0, llvm::Attribute::ByVal));
                 }
-                ctx.symtab_[name] = std::make_unique<param_sym>(iter, type_->getFunctionParamType(idx), idx);
+                ctx.symtab_.insert(name_, std::make_unique<param_sym>(iter, type_->getFunctionParamType(idx), idx));
             }
 
             return f;
@@ -548,7 +564,7 @@ namespace kaleidoscope
 
         llvm::Function *codegen(codegen_ctx &ctx)
         {
-            ctx.enter_scope();
+            ctx.symtab_.enter_scope();
 
             auto f = proto_->codegen(ctx);
 
@@ -565,7 +581,7 @@ namespace kaleidoscope
 
             ctx.curr_fun_ = nullptr;
 
-            ctx.exit_scope();
+            ctx.symtab_.exit_scope();
 
             return f;
         }
@@ -877,7 +893,7 @@ namespace kaleidoscope
                     return std::make_unique<number_node>(value);
                 }
                 case token::ident:
-                    return parse_ident();
+                    return parse_call();
                 case token::lpar:
                 {
                     move_next();
@@ -889,7 +905,32 @@ namespace kaleidoscope
             throw std::domain_error("unexpected expr");
         }
 
-        // call = ident "(" [ident {"," ident}] } ")"
+        // call = qualident "(" [expr {"," expr}] } ")"
+        std::unique_ptr<expr_node> parse_call()
+        {
+            auto target = parse_ident();
+
+            if (curr_tok_ != token::lpar)
+                return target;
+
+            expect(token::lpar);
+
+            std::vector<std::unique_ptr<expr_node>> args;
+
+            if (curr_tok_ != token::rpar) {
+                args.push_back(parse_expr());
+                while (curr_tok_ == token::comma) {
+                    move_next();
+                    args.push_back(parse_expr());
+                }
+            }
+
+            expect(token::rpar);
+
+            return std::make_unique<call_node>(std::move(target), std::move(args));
+        }
+
+        // qualident = ident { "." ident }
         std::unique_ptr<expr_node> parse_ident()
         {
             auto name = lexeme;
@@ -902,23 +943,6 @@ namespace kaleidoscope
                 auto field_name = lexeme;
                 move_next();
                 result = new field_access_node(std::unique_ptr<expr_node>(result), field_name);
-            }
-
-            if (curr_tok_ == token::lpar) {
-                move_next();
-                std::vector<std::unique_ptr<expr_node>> args;
-
-                if (curr_tok_ != token::rpar) {
-                    args.push_back(parse_expr());
-                    while (curr_tok_ == token::comma) {
-                        move_next();
-                        args.push_back(parse_expr());
-                    }
-                }
-
-                expect(token::rpar);
-
-                return std::make_unique<call_node>(name, std::move(args));
             }
 
             return std::unique_ptr<expr_node>(result);
