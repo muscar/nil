@@ -24,8 +24,6 @@
 
 namespace kaleidoscope
 {
-    // #pragma mark - Semantic
-    
     template<typename T>
     class symtab
     {
@@ -105,8 +103,6 @@ namespace kaleidoscope
             return idx_;
         }
     };
-    
-    // #pragma mark - Codegen
     
     struct codegen_ctx
     {
@@ -930,7 +926,7 @@ namespace kaleidoscope
             
             expr_node *result = new var_node(name);
             
-            while (curr_tok_ == token::period ) {
+            while (curr_tok_ == token::period) {
                 move_next();
                 auto field_name = lexeme;
                 move_next();
@@ -1003,11 +999,8 @@ int main(int argc, const char *argv[])
     llvm::WriteBitcodeToFile(&ctx.module_, os);
     os.close();
     
-//    std::cout << "/usr/local/bin/llc-3.4 -filetype=obj " + project_path + bc_file_name + " -o " + project_path + obj_file_name << std::endl;
-    system(("/usr/local/bin/llc-3.4 -filetype=obj " + project_path + bc_file_name + " -o " + project_path + obj_file_name).c_str());
-//    std::cout << "clang -std=c11 -O1 -Wall -Werror -c " + project_path + "lib.c" + project_path + "lib.o" << std::endl;
+    system(("/usr/local/opt/llvm/bin/llc -filetype=obj " + project_path + bc_file_name + " -o " + project_path + obj_file_name).c_str());
     system(("clang -std=c11 -O1 -Wall -Werror -c " + project_path + "lib.c" + " -o "  + project_path + "lib.o").c_str());
-//    std::cout << "clang " + project_path + "lib.o " + project_path + obj_file_name + " -o " + project_path + exe_file_name << std::endl;
     system(("clang " + project_path + "lib.o " + project_path + obj_file_name + " -o " + project_path + exe_file_name).c_str());
     
     return 0;
