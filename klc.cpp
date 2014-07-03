@@ -171,6 +171,21 @@ namespace kaleidoscope
         
         virtual llvm::Type *type(codegen_ctx &ctx) = 0;
         virtual llvm::Value *codegen(codegen_ctx &ctx) = 0;
+
+        virtual bool is_assignable() const
+        {
+            return false;
+        }
+
+        virtual bool is_qualified() const
+        {
+            return false;
+        }
+
+        virtual std::string name() const
+        {
+            return "";
+        }
     };
     
     class number_node : public expr_node
@@ -220,30 +235,45 @@ namespace kaleidoscope
             ctx.symtab_.lookup(name_, sym);
             return sym.value();
         }
+
+        bool is_assignable() const
+        {
+            return true;
+        }
     };
     
     class var_decl_node : public expr_node
     {
-        std::string name_;
+        std::unique_ptr<expr_node> dest_;
         std::unique_ptr<expr_node> value_;
     public:
-        var_decl_node(std::string name, std::unique_ptr<expr_node> value) : name_(name), value_(std::move(value)) { }
+        var_decl_node(std::unique_ptr<expr_node> dest, std::unique_ptr<expr_node> value) : dest_(std::move(dest)), value_(std::move(value)) { }
         
         llvm::Type *type(codegen_ctx &ctx)
         {
+            if (!dest_->is_assignable())
+                throw std::domain_error("lhs in assignment is not assignable");
             auto value_ty = value_->type(ctx);
-            ctx.symtab_.insert(name_, std::make_unique<symbol>(nullptr, value_ty));
+            if (!dest_->is_qualified())
+                ctx.symtab_.insert(dest_->name(), std::make_unique<symbol>(nullptr, value_ty));
             return value_ty;
         }
         
         llvm::Value *codegen(codegen_ctx &ctx)
         {
+            if (!dest_->is_assignable())
+                throw std::domain_error("lhs in assignment is not assignable");
             auto value = value_->codegen(ctx);
             llvm::IRBuilder<> builder(&ctx.curr_fun_->getEntryBlock(), ctx.curr_fun_->getEntryBlock().begin());
-            auto addr = builder.CreateAlloca(value->getType(), 0, name_.c_str());
-            store(ctx, addr, value);
-            ctx.symtab_.insert(name_, std::make_unique<symbol>(value, value->getType()));
-            return addr;
+
+            if (!dest_->is_qualified()) {
+                auto addr = builder.CreateAlloca(value->getType(), 0, dest_->name().c_str());
+                store(ctx, addr, value);
+                ctx.symtab_.insert(dest_->name(), std::make_unique<symbol>(value, value->getType()));
+                return addr;
+            }
+
+            throw std::domain_error("not implemented: qualified lhs in assignment");
         }
         
     };
@@ -280,6 +310,16 @@ namespace kaleidoscope
                 throw std::domain_error("unbound field " + field_);
             auto field_ptr = ctx.builder_.CreateStructGEP(target_->codegen(ctx), it->second->index());
             return load(ctx, field_ptr);
+        }
+
+        bool is_assignable() const
+        {
+            return true;
+        }
+
+        bool is_qualified() const
+        {
+            return true;
         }
     };
     
@@ -610,7 +650,6 @@ namespace kaleidoscope
         kw_struct,
         kw_def,
         kw_extern,
-        kw_var,
         rarr,
         eq,
         lpar,
@@ -638,8 +677,6 @@ namespace kaleidoscope
                 return "def keyword";
             case token::kw_extern:
                 return "extern keyword";
-            case token::kw_var:
-                return "var keyword";
             case token::ident:
                 return "identifier";
             case token::num:
@@ -733,7 +770,6 @@ namespace kaleidoscope
             }
 
             if (in_.peek() == '-') {
-                // tok = token::minus;
                 in_.get();
                 if (in_.peek() == '>') {
                     tok = token::rarr;
@@ -771,8 +807,6 @@ namespace kaleidoscope
                     tok = token::kw_def;
                 else if (lexeme_ == "extern")
                     tok = token::kw_extern;
-                else if (lexeme_ == "var")
-                    tok = token::kw_var;
                 else
                     tok = token::ident;
             } else {
@@ -924,20 +958,13 @@ namespace kaleidoscope
         // expr = factor | val_decl
         std::unique_ptr<expr_node> parse_expr()
         {
-            if (curr_tok_ == token::kw_var)
-                return parse_var_decl();
-            return parse_factor();
-        }
-        
-        // var_decl = "var" ident "=" expr
-        std::unique_ptr<expr_node> parse_var_decl()
-        {
-            expect(token::kw_var);
-            auto name = scanner_.lexeme();
-            expect(token::ident);
-            expect(token::eq);
-            auto value = parse_expr();
-            return std::make_unique<var_decl_node>(name, std::move(value));
+            auto node = parse_factor();
+            if (curr_tok_ == token::eq) {
+                move_next();
+                auto value = parse_expr();
+                return std::make_unique<var_decl_node>(std::move(node), std::move(value));
+            }
+            return std::move(node);
         }
         
         // factor = num | ident | call
