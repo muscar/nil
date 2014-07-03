@@ -2,31 +2,31 @@ extern def println(): int32
 extern def print_int32(n: int32): int32
 
 struct Point
-    x: int32;
+    x: int32
     y: int32
 
 struct Line
-    p1: Point;
+    p1: Point
     p2: Point
 
 def fst(p: Point): int32
-    var result = p.x;
+    var result = p.x
     result
 
 def snd(p: Point): int32
     p.y
 
 def print_point(p: Point): int32
-    print_int32(fst(p));
+    print_int32(fst(p))
     print_int32(snd(p))
 
 def main(): int32
-    var l = Line(Point(10, 20), Point(100, 200));
-    var p1 = l.p1;
-    var p2 = l.p2;
-    print_int32(l.p1.x);
-    print_int32(l.p1.y);
-    println();
-    print_point(p2);
-    println();
+    var l = Line(Point(10, 20), Point(100, 200))
+    var p1 = l.p1
+    var p2 = l.p2
+    print_int32(l.p1.x)
+    print_int32(l.p1.y)
+    println()
+    print_point(p2)
+    println()
     0

@@ -627,6 +627,10 @@ namespace kaleidoscope
                 return "unknown";
             case token::eof:
                 return "end of file";
+            case token::indent:
+                return "indent";
+            case token::dedent:
+                return "dedent";
             case token::kw_struct:
                 return "struct keyword";
             case token::kw_def:
@@ -659,8 +663,12 @@ namespace kaleidoscope
 
     class scanner
     {
-        std::string lexeme_;
         std::istream &in_;
+        std::string lexeme_;
+
+        std::vector<int> indents_ { 0 };
+        int pending_dedents_ = 0;
+        bool new_line_ = true;
 
     public:
         scanner(std::istream &in) : in_{in} { }
@@ -682,10 +690,45 @@ namespace kaleidoscope
         {
             if (in_.eof())
                 return token::eof;
+
+            if (pending_dedents_ > 0) {
+                pending_dedents_--;
+                return token::dedent;
+            }
+
             auto tok = token::unknown;
             lexeme_.clear();
-            while (isspace(in_.peek()))
+
+            while (in_.peek() == '\n') {
                 in_.get();
+                new_line_ = true;
+            }
+
+            auto indent = 0;
+            while (isspace(in_.peek())) {
+                in_.get();
+                if (new_line_)
+                    indent++;
+            }
+
+            if (new_line_) {
+                new_line_ = false;
+
+                if (indent > indents_.back()) {
+                    indents_.push_back(indent);
+                    return token::indent;
+                }
+
+                if (indent < indents_.back()) {
+                    while (indent < indents_.back()) {
+                        pending_dedents_++;
+                        indents_.pop_back();
+                    }
+                    pending_dedents_--;
+                    return token::dedent;
+                }
+            }
+
             if (in_.peek() == '=') {
                 tok = token::eq;
                 in_.get();
@@ -750,8 +793,16 @@ namespace kaleidoscope
         std::unique_ptr<module_node> parse_module()
         {
             auto mod = std::make_unique<module_node>();
-            while (curr_tok_ == token::kw_struct || curr_tok_ == token::kw_extern || curr_tok_ == token::kw_def)
-                mod->add_def(parse_def());
+            while (curr_tok_ != token::eof)
+                switch (curr_tok_) {
+                    case token::kw_struct:
+                    case token::kw_extern:
+                    case token::kw_def:
+                        mod->add_def(parse_def());
+                        break;
+                    default:
+                        throw std::domain_error("unexpected token " + to_string(curr_tok_));
+                }
             return mod;
         }
         
@@ -777,12 +828,15 @@ namespace kaleidoscope
             auto name = scanner_.lexeme();
             move_next();
             std::vector<std::pair<std::string, std::string>> fields;
+
+            expect(token::indent);
             
             fields.push_back(parse_annotated_ident());
-            while (curr_tok_ == token::semicolon) {
-                move_next();
+            while (curr_tok_ != token::dedent)
                 fields.push_back(parse_annotated_ident());
-            }
+
+            while (curr_tok_ == token::dedent)
+                move_next();
             
             return std::make_unique<struct_node>(name, std::move(fields));
         }
@@ -791,7 +845,16 @@ namespace kaleidoscope
         // fun_body = "{" expr "}"
         std::unique_ptr<function_node> parse_function()
         {
-            return std::make_unique<function_node>(parse_prototype(), parse_expr_seq());
+            auto proto = parse_prototype();
+
+            expect(token::indent);
+
+            auto body = parse_expr_seq();
+
+            while (curr_tok_ == token::dedent)
+                move_next();
+
+            return std::make_unique<function_node>(std::move(proto), std::move(body));
         }
         
         // fun_proto = "fun" ident "(" [ident {"," ident}] } ")" ":" ident
@@ -837,10 +900,8 @@ namespace kaleidoscope
         {
             auto node = std::make_unique<seq_node>();
             node->add_expr(std::move(parse_expr()));
-            while (curr_tok_ == token::semicolon) {
-                move_next();
+            while (curr_tok_ != token::dedent)
                 node->add_expr(std::move(parse_expr()));
-            }
             return std::move(node);
         }
         
@@ -884,7 +945,7 @@ namespace kaleidoscope
                     return result;
                 }
             }
-            throw std::domain_error("unexpected expr");
+            throw std::domain_error("unexpected expr " + to_string(curr_tok_));
         }
         
         // call = qualident "(" [expr {"," expr}] } ")"
@@ -940,7 +1001,7 @@ namespace kaleidoscope
         {
             auto aux = curr_tok_;
             if (aux != tok) {
-                std::cerr << "expecting " << to_string(tok) << ", but got " << to_string(aux) << "(" << scanner_.lexeme() << ")" << std::endl;
+                std::cerr << "expecting " << to_string(tok) << ", but got " << to_string(aux) << " (" << scanner_.lexeme() << ")" << std::endl;
                 throw std::domain_error(to_string(aux));
             }
             move_next();
