@@ -611,6 +611,7 @@ namespace kaleidoscope
         kw_def,
         kw_extern,
         kw_var,
+        rarr,
         eq,
         lpar,
         rpar,
@@ -643,6 +644,8 @@ namespace kaleidoscope
                 return "identifier";
             case token::num:
                 return "number";
+            case token::rarr:
+                return "->";
             case token::eq:
                 return "=";
             case token::lpar:
@@ -729,7 +732,14 @@ namespace kaleidoscope
                 }
             }
 
-            if (in_.peek() == '=') {
+            if (in_.peek() == '-') {
+                // tok = token::minus;
+                in_.get();
+                if (in_.peek() == '>') {
+                    tok = token::rarr;
+                    in_.get();
+                }
+            } else if (in_.peek() == '=') {
                 tok = token::eq;
                 in_.get();
             } else if (in_.peek() == '(') {
@@ -814,7 +824,7 @@ namespace kaleidoscope
                     return parse_struct();
                 case token::kw_extern:
                     move_next();
-                    return parse_prototype();
+                    return parse_prototype(true);
                 case token::kw_def:
                     return parse_function();
             }
@@ -827,6 +837,9 @@ namespace kaleidoscope
             expect(token::kw_struct);
             auto name = scanner_.lexeme();
             move_next();
+
+            expect(token::colon);
+
             std::vector<std::pair<std::string, std::string>> fields;
 
             expect(token::indent);
@@ -858,7 +871,7 @@ namespace kaleidoscope
         }
         
         // fun_proto = "fun" ident "(" [ident {"," ident}] } ")" ":" ident
-        std::unique_ptr<prototype_node> parse_prototype()
+        std::unique_ptr<prototype_node> parse_prototype(bool is_extern = false)
         {
             expect(token::kw_def);
             auto name = scanner_.lexeme();
@@ -877,9 +890,12 @@ namespace kaleidoscope
             }
             
             expect(token::rpar);
-            expect(token::colon);
+            expect(token::rarr);
             auto ty_annot = scanner_.lexeme();
             expect(token::ident);
+
+            if (!is_extern)
+                expect(token::colon);
             
             return std::make_unique<prototype_node>(name, std::move(params), ty_annot);
         }
