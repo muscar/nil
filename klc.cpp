@@ -603,17 +603,17 @@ namespace kaleidoscope
     {
         unknown = -2,
         eof = -1,
-        ident = 0,
+        indent = 0,
+        dedent,
+        ident,
         num,
         kw_struct,
-        kw_fun,
+        kw_def,
         kw_extern,
         kw_var,
         eq,
         lpar,
         rpar,
-        lcurly,
-        rcurly,
         period,
         comma,
         colon,
@@ -629,8 +629,8 @@ namespace kaleidoscope
                 return "end of file";
             case token::kw_struct:
                 return "struct keyword";
-            case token::kw_fun:
-                return "fun keyword";
+            case token::kw_def:
+                return "def keyword";
             case token::kw_extern:
                 return "extern keyword";
             case token::kw_var:
@@ -645,10 +645,6 @@ namespace kaleidoscope
                 return "(";
             case token::rpar:
                 return ")";
-            case token::lcurly:
-                return "{";
-            case token::rcurly:
-                return "}";
             case token::period:
                 return ".";
             case token::comma:
@@ -660,83 +656,89 @@ namespace kaleidoscope
         }
         return "unknown";
     }
-    
-    static std::string lexeme;
-    
-    template<typename UnaryPredicate>
-    void read_while(std::istream &in, UnaryPredicate pred)
+
+    class scanner
     {
-        lexeme.clear();
-        while (!in.eof() && pred(in.peek()))
-            lexeme.push_back(in.get());
-    }
-    
-    token next(std::istream &in)
-    {
-        if (in.eof())
-            return token::eof;
-        auto tok = token::unknown;
-        lexeme.clear();
-        while (isspace(in.peek()))
-            in.get();
-        if (in.peek() == '=') {
-            tok = token::eq;
-            in.get();
-        } else if (in.peek() == '(') {
-            tok = token::lpar;
-            in.get();
-        } else if (in.peek() == ')') {
-            tok = token::rpar;
-            in.get();
-        } else if (in.peek() == '{') {
-            tok = token::lcurly;
-            in.get();
-        } else if (in.peek() == '}') {
-            tok = token::rcurly;
-            in.get();
-        } else if (in.peek() == '.') {
-            tok = token::period;
-            in.get();
-        } else if (in.peek() == ',') {
-            tok = token::comma;
-            in.get();
-        } else if (in.peek() == ':') {
-            tok = token::colon;
-            in.get();
-        } else if (in.peek() == ';') {
-            tok = token::semicolon;
-            in.get();
-        } else if (isdigit(in.peek())) {
-            read_while(in, isdigit);
-            tok = token::num;
-        } else if (isalnum(in.peek())) {
-            read_while(in, [](auto c) { return isalnum(c) || c == '_'; });
-            if (lexeme == "struct")
-                tok = token::kw_struct;
-            else if (lexeme == "fun")
-                tok = token::kw_fun;
-            else if (lexeme == "extern")
-                tok = token::kw_extern;
-            else if (lexeme == "var")
-                tok = token::kw_var;
-            else
-                tok = token::ident;
-        } else {
-            read_while(in, [](auto c) { return !isspace(c); });
+        std::string lexeme_;
+        std::istream &in_;
+
+    public:
+        scanner(std::istream &in) : in_{in} { }
+
+        std::string lexeme() const
+        {
+            return lexeme_;
         }
-        return tok;
-    }
-    
+        
+        template<typename UnaryPredicate>
+        void read_while(std::istream &in, UnaryPredicate pred)
+        {
+            lexeme_.clear();
+            while (!in.eof() && pred(in.peek()))
+                lexeme_.push_back(in.get());
+        }
+        
+        token next()
+        {
+            if (in_.eof())
+                return token::eof;
+            auto tok = token::unknown;
+            lexeme_.clear();
+            while (isspace(in_.peek()))
+                in_.get();
+            if (in_.peek() == '=') {
+                tok = token::eq;
+                in_.get();
+            } else if (in_.peek() == '(') {
+                tok = token::lpar;
+                in_.get();
+            } else if (in_.peek() == ')') {
+                tok = token::rpar;
+                in_.get();
+            } else if (in_.peek() == '.') {
+                tok = token::period;
+                in_.get();
+            } else if (in_.peek() == ',') {
+                tok = token::comma;
+                in_.get();
+            } else if (in_.peek() == ':') {
+                tok = token::colon;
+                in_.get();
+            } else if (in_.peek() == ';') {
+                tok = token::semicolon;
+                in_.get();
+            } else if (isdigit(in_.peek())) {
+                read_while(in_, isdigit);
+                tok = token::num;
+            } else if (isalnum(in_.peek())) {
+                read_while(in_, [](auto c) { return isalnum(c) || c == '_'; });
+                if (lexeme_ == "struct")
+                    tok = token::kw_struct;
+                else if (lexeme_ == "def")
+                    tok = token::kw_def;
+                else if (lexeme_ == "extern")
+                    tok = token::kw_extern;
+                else if (lexeme_ == "var")
+                    tok = token::kw_var;
+                else
+                    tok = token::ident;
+            } else {
+                read_while(in_, [](auto c) { return !isspace(c); });
+            }
+            return tok;
+        }
+    };
+
     // Parser
     
     class parser
     {
     public:
         token curr_tok_;
-        std::istream &in_;
+        scanner scanner_;
         
     public:
-        parser(std::istream &in) : in_(in) { }
+        parser(std::istream &in) : scanner_{in} { }
         
         std::unique_ptr<module_node> parse()
         {
@@ -748,7 +750,7 @@ namespace kaleidoscope
         std::unique_ptr<module_node> parse_module()
         {
             auto mod = std::make_unique<module_node>();
-            while (curr_tok_ == token::kw_struct || curr_tok_ == token::kw_extern || curr_tok_ == token::kw_fun)
+            while (curr_tok_ == token::kw_struct || curr_tok_ == token::kw_extern || curr_tok_ == token::kw_def)
                 mod->add_def(parse_def());
             return mod;
         }
@@ -762,7 +764,7 @@ namespace kaleidoscope
                 case token::kw_extern:
                     move_next();
                     return parse_prototype();
-                case token::kw_fun:
+                case token::kw_def:
                     return parse_function();
             }
             throw std::domain_error("expecting a definition at the toplevel");
@@ -772,19 +774,15 @@ namespace kaleidoscope
         std::unique_ptr<struct_node> parse_struct()
         {
             expect(token::kw_struct);
-            auto name = lexeme;
+            auto name = scanner_.lexeme();
             move_next();
             std::vector<std::pair<std::string, std::string>> fields;
-            
-            expect(token::lcurly);
             
             fields.push_back(parse_annotated_ident());
             while (curr_tok_ == token::semicolon) {
                 move_next();
                 fields.push_back(parse_annotated_ident());
             }
-            
-            expect(token::rcurly);
             
             return std::make_unique<struct_node>(name, std::move(fields));
         }
@@ -793,18 +791,14 @@ namespace kaleidoscope
         // fun_body = "{" expr "}"
         std::unique_ptr<function_node> parse_function()
         {
-            auto proto = parse_prototype();
-            expect(token::lcurly);
-            auto body = parse_expr_seq();
-            expect(token::rcurly);
-            return std::make_unique<function_node>(std::move(proto), std::move(body));
+            return std::make_unique<function_node>(parse_prototype(), parse_expr_seq());
         }
         
         // fun_proto = "fun" ident "(" [ident {"," ident}] } ")" ":" ident
         std::unique_ptr<prototype_node> parse_prototype()
         {
-            expect(token::kw_fun);
-            auto name = lexeme;
+            expect(token::kw_def);
+            auto name = scanner_.lexeme();
             move_next();
             
             expect(token::lpar);
@@ -821,7 +815,7 @@ namespace kaleidoscope
             
             expect(token::rpar);
             expect(token::colon);
-            auto ty_annot = lexeme;
+            auto ty_annot = scanner_.lexeme();
             expect(token::ident);
             
             return std::make_unique<prototype_node>(name, std::move(params), ty_annot);
@@ -830,10 +824,10 @@ namespace kaleidoscope
         // annotated_ident = ident ":" ident
         std::pair<std::string, std::string> parse_annotated_ident()
         {
-            auto name = lexeme;
+            auto name = scanner_.lexeme();
             expect(token::ident);
             expect(token::colon);
-            auto ty_annot = lexeme;
+            auto ty_annot = scanner_.lexeme();
             expect(token::ident);
             return std::make_pair(name, ty_annot);
         }
@@ -862,7 +856,7 @@ namespace kaleidoscope
         std::unique_ptr<expr_node> parse_var_decl()
         {
             expect(token::kw_var);
-            auto name = lexeme;
+            auto name = scanner_.lexeme();
             expect(token::ident);
             expect(token::eq);
             auto value = parse_expr();
@@ -876,7 +870,7 @@ namespace kaleidoscope
             switch (tok) {
                 case token::num:
                 {
-                    auto value = std::stoi(lexeme);
+                    auto value = std::stoi(scanner_.lexeme());
                     move_next();
                     return std::make_unique<number_node>(value);
                 }
@@ -921,14 +915,14 @@ namespace kaleidoscope
         // qualident = ident { "." ident }
         std::unique_ptr<expr_node> parse_ident()
         {
-            auto name = lexeme;
+            auto name = scanner_.lexeme();
             move_next();
             
             expr_node *result = new var_node(name);
             
             while (curr_tok_ == token::period) {
                 move_next();
-                auto field_name = lexeme;
+                auto field_name = scanner_.lexeme();
                 move_next();
                 result = new field_access_node(std::unique_ptr<expr_node>(result), field_name);
             }
@@ -939,14 +933,14 @@ namespace kaleidoscope
     private:
         void move_next()
         {
-            curr_tok_ = next(in_);
+            curr_tok_ = scanner_.next();
         }
         
         token expect(token tok)
         {
             auto aux = curr_tok_;
             if (aux != tok) {
-                std::cerr << "expecting " << to_string(tok) << ", but got " << to_string(aux) << "(" << lexeme << ")" << std::endl;
+                std::cerr << "expecting " << to_string(tok) << ", but got " << to_string(aux) << "(" << scanner_.lexeme() << ")" << std::endl;
                 throw std::domain_error(to_string(aux));
             }
             move_next();
