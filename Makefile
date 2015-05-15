@@ -1,6 +1,6 @@
 CC=clang++
 CXXFLAGS=-std=c++1y -Wall
-LDFLAGS=$(shell /usr/local/opt/llvm/bin/llvm-config --cppflags --ldflags --libs core native bitwriter support)
+LDFLAGS=$(shell /usr/local/opt/llvm/bin/llvm-config --cppflags --ldflags --libs core native bitwriter support --system-libs)
 TARGET=klc
 
 VALGRIND=valgrind

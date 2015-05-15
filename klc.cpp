@@ -10,15 +10,16 @@
 #include <cctype>
 
 #include <llvm/Analysis/Passes.h>
-#include <llvm/Analysis/Verifier.h>
 #include <llvm/Bitcode/ReaderWriter.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
-#include <llvm/PassManager.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Transforms/Scalar.h>
 
@@ -107,7 +108,7 @@ namespace kaleidoscope
     struct codegen_ctx
     {
         llvm::Module module_;
-        llvm::FunctionPassManager pass_mgr_;
+        // llvm::FunctionPassManager pass_mgr_;
         llvm::IRBuilder<> builder_;
         llvm::Function *curr_fun_;
         
@@ -116,7 +117,7 @@ namespace kaleidoscope
         std::map<std::string, llvm::Type *> tenv_;
         
         codegen_ctx(const std::string &name)
-        : module_{name, llvm::getGlobalContext()}, pass_mgr_{&module_}, builder_{module_.getContext()}
+        : module_{name, llvm::getGlobalContext()}, builder_{module_.getContext()}
         { }
         
         void init()
@@ -131,14 +132,14 @@ namespace kaleidoscope
             
             // llvm::InitializeNativeTarget();
             
-            pass_mgr_.add(llvm::createBasicAliasAnalysisPass());
-            pass_mgr_.add(llvm::createPromoteMemoryToRegisterPass());
-            pass_mgr_.add(llvm::createInstructionCombiningPass());
-            pass_mgr_.add(llvm::createReassociatePass());
-            pass_mgr_.add(llvm::createGVNPass());
-            pass_mgr_.add(llvm::createCFGSimplificationPass());
+            // pass_mgr_.addPass(llvm::createBasicAliasAnalysisPass());
+            // pass_mgr_.addPass(llvm::createPromoteMemoryToRegisterPass());
+            // pass_mgr_.addPass(llvm::createInstructionCombiningPass());
+            // pass_mgr_.addPass(llvm::createReassociatePass());
+            // pass_mgr_.addPass(llvm::createGVNPass());
+            // pass_mgr_.addPass(llvm::createCFGSimplificationPass());
             
-            pass_mgr_.doInitialization();
+            // pass_mgr_.doInitialization();
         }
     };
     
@@ -504,7 +505,7 @@ namespace kaleidoscope
             ctx.builder_.CreateRet(ret_val);
             
             llvm::verifyFunction(*ctor_fun_);
-            ctx.pass_mgr_.run(*ctor_fun_);
+            // ctx.pass_mgr_.run(*ctor_fun_);
             
             // ctx.exit_scope();
             
@@ -605,7 +606,7 @@ namespace kaleidoscope
             ctx.builder_.CreateRet(ret_val);
             
             llvm::verifyFunction(*f);
-            ctx.pass_mgr_.run(*f);
+            // ctx.pass_mgr_.run(*f);
             
             ctx.curr_fun_ = nullptr;
             
@@ -1086,14 +1087,14 @@ int main(int argc, const char *argv[])
     
     ctx.module_.dump();
     
-    std::string project_path = "/Users/alex/Documents/Dev/cpp/kaleidoscope/";
+    std::string project_path = "./";
     
     auto bc_file_name = module_name + ".bc";
     auto obj_file_name = module_name + ".o";
     auto exe_file_name = module_name + ".out";
     
-    std::string err;
-    llvm::raw_fd_ostream os((project_path + bc_file_name).c_str(), err);
+    std::error_code err;
+    llvm::raw_fd_ostream os((project_path + bc_file_name).c_str(), err, llvm::sys::fs::F_None);
     llvm::WriteBitcodeToFile(&ctx.module_, os);
     os.close();
     
