@@ -28,12 +28,12 @@ namespace kaleidoscope
     template<typename T>
     class symtab
     {
-        std::vector<std::unique_ptr<std::map<std::string, std::unique_ptr<T>>>> scopes_;
+        std::vector<std::map<std::string, std::unique_ptr<T>>> scopes_;
     public:
         void enter_scope()
         {
             std::cout << "+scope" << std::endl;
-            scopes_.push_back(std::make_unique<std::map<std::string, std::unique_ptr<T>>>());
+            scopes_.push_back(std::map<std::string, std::unique_ptr<T>>());
         }
         
         void exit_scope()
@@ -45,14 +45,14 @@ namespace kaleidoscope
         void insert(const std::string &key, std::unique_ptr<T> value)
         {
             std::cout << "registering " << key << std::endl;
-            scopes_.back()->emplace(key, std::move(value));
+            scopes_.back().emplace(key, std::move(value));
         }
         
         bool lookup(const std::string &key, T &out) const
         {
             for (auto &&s : scopes_) {
-                auto it = s->find(key);
-                if (it != s->end()) {
+                auto it = s.find(key);
+                if (it != s.end()) {
                     out = *it->second;
                     return true;
                 }
