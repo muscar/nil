@@ -4,6 +4,7 @@
 #include <memory>
 #include <exception>
 #include <vector>
+#include <iterator>
 #include <map>
 #include <algorithm>
 #include <cstdlib>
@@ -155,12 +156,18 @@ namespace kaleidoscope
     
     // Types
     
-    llvm::Type *resolve_type(const codegen_ctx &ctx, const std::string &name)
+    struct type_node
     {
-        auto it = ctx.tenv_.find(name);
+        const std::string name;
+        const bool is_pointer;
+    };
+    
+    llvm::Type *resolve_type(const codegen_ctx &ctx, const type_node &type)
+    {
+        auto it = ctx.tenv_.find(type.name);
         if (it == ctx.tenv_.end())
-            throw std::domain_error("unknown type " + name);
-        return it->second;
+            throw std::domain_error("unknown type " + type.name);
+        return type.is_pointer ? llvm::PointerType::getUnqual(it->second) : it->second;
     }
     
     // AST
@@ -202,7 +209,7 @@ namespace kaleidoscope
         
         llvm::Type *type(codegen_ctx &ctx)
         {
-            return resolve_type(ctx, "int32");
+            return resolve_type(ctx, {"int32", false});
         }
         
         llvm::Value *codegen(codegen_ctx &ctx)
@@ -232,6 +239,7 @@ namespace kaleidoscope
         
         llvm::Value *codegen(codegen_ctx &ctx)
         {
+            std::cout << "codegen " << name_ << std::endl;
             symbol sym;
             ctx.symtab_.lookup(name_, sym);
             return sym.value();
@@ -336,7 +344,7 @@ namespace kaleidoscope
         
         llvm::Type *type(codegen_ctx &ctx)
         {
-            return resolve_type(ctx, "int32");
+            return resolve_type(ctx, {"int32", false});
         }
         
         llvm::Value *codegen(codegen_ctx &ctx)
@@ -424,13 +432,13 @@ namespace kaleidoscope
         }
     };
     
-    class def_node
+    class decl_node
     {
     protected:
         llvm::Type *type_;
         
     public:
-        virtual ~def_node() { }
+        virtual ~decl_node() { }
         
         virtual llvm::Type *type(codegen_ctx &ctx) = 0;
         
@@ -438,14 +446,14 @@ namespace kaleidoscope
         virtual llvm::Function *codegen(codegen_ctx &ctx) = 0;
     };
     
-    class struct_node : public def_node
+    class struct_node : public decl_node
     {
         std::string name_;
-        std::vector<std::pair<std::string, std::string>> fields_;
+        std::vector<std::pair<std::string, type_node>> fields_;
         
         llvm::Function *ctor_fun_;
     public:
-        struct_node(std::string name, std::vector<std::pair<std::string, std::string>> fields)
+        struct_node(std::string name, std::vector<std::pair<std::string, type_node>> fields)
         : name_(name), fields_(fields)
         { }
         
@@ -513,14 +521,14 @@ namespace kaleidoscope
         }
     };
     
-    class prototype_node : public def_node
+    class prototype_node : public decl_node
     {
         std::string name_;
-        std::vector<std::pair<std::string, std::string>> params_;
-        std::string ty_annot_;
+        std::vector<std::pair<std::string, type_node>> params_;
+        type_node ty_annot_;
         
     public:
-        prototype_node(std::string name, std::vector<std::pair<std::string, std::string>> params, std::string ty_annot)
+        prototype_node(std::string name, std::vector<std::pair<std::string, type_node>> params, type_node ty_annot)
         : name_(name), params_(params), ty_annot_(ty_annot)
         { }
         
@@ -577,7 +585,7 @@ namespace kaleidoscope
         }
     };
     
-    class function_node : public def_node
+    class function_node : public decl_node
     {
         std::unique_ptr<prototype_node> proto_;
         std::unique_ptr<expr_node> body_;
@@ -618,9 +626,9 @@ namespace kaleidoscope
     
     class module_node
     {
-        std::vector<std::unique_ptr<def_node>> defs_;
+        std::vector<std::unique_ptr<decl_node>> defs_;
     public:
-        void add_def(std::unique_ptr<def_node> def)
+        void add_def(std::unique_ptr<decl_node> def)
         {
             defs_.push_back(std::move(def));
         }
@@ -653,6 +661,7 @@ namespace kaleidoscope
         kw_extern,
         rarr,
         eq,
+        star,
         lpar,
         rpar,
         period,
@@ -686,6 +695,8 @@ namespace kaleidoscope
                 return "->";
             case token::eq:
                 return "=";
+            case token::star:
+                return "*";
             case token::lpar:
                 return "(";
             case token::rpar:
@@ -779,6 +790,9 @@ namespace kaleidoscope
             } else if (in_.peek() == '=') {
                 tok = token::eq;
                 in_.get();
+            } else if (in_.peek() == '*') {
+                tok = token::star;
+                in_.get();
             } else if (in_.peek() == '(') {
                 tok = token::lpar;
                 in_.get();
@@ -852,7 +866,7 @@ namespace kaleidoscope
         }
         
         // def = fun_proto | fun_decl
-        std::unique_ptr<def_node> parse_def()
+        std::unique_ptr<decl_node> parse_def()
         {
             switch (curr_tok_) {
                 case token::kw_struct:
@@ -875,7 +889,7 @@ namespace kaleidoscope
 
             expect(token::colon);
 
-            std::vector<std::pair<std::string, std::string>> fields;
+            std::vector<std::pair<std::string, type_node>> fields;
 
             expect(token::indent);
             
@@ -914,7 +928,7 @@ namespace kaleidoscope
             
             expect(token::lpar);
             
-            std::vector<std::pair<std::string, std::string>> params;
+            std::vector<std::pair<std::string, type_node>> params;
             
             if (curr_tok_ != token::rpar) {
                 params.push_back(parse_annotated_ident());
@@ -926,8 +940,7 @@ namespace kaleidoscope
             
             expect(token::rpar);
             expect(token::rarr);
-            auto ty_annot = scanner_.lexeme();
-            expect(token::ident);
+            auto ty_annot = parse_type_annot();
 
             if (!is_extern)
                 expect(token::colon);
@@ -936,14 +949,25 @@ namespace kaleidoscope
         }
         
         // annotated_ident = ident ":" ident
-        std::pair<std::string, std::string> parse_annotated_ident()
+        std::pair<std::string, type_node> parse_annotated_ident()
         {
             auto name = scanner_.lexeme();
             expect(token::ident);
             expect(token::colon);
-            auto ty_annot = scanner_.lexeme();
-            expect(token::ident);
+            auto ty_annot = parse_type_annot();
             return std::make_pair(name, ty_annot);
+        }
+
+        type_node parse_type_annot()
+        {
+            auto is_pointer = false;
+            if (curr_tok_ == token::star) {
+                move_next();
+                is_pointer = true;
+            }
+            auto ty_name = scanner_.lexeme();
+            expect(token::ident);
+            return {ty_name, is_pointer};
         }
         
         // expr_seq = expr { ";" expr }
@@ -1056,12 +1080,12 @@ namespace kaleidoscope
 
 std::string basename(const std::string& pathname)
 {
-    return std::string(std::find(rbegin(pathname), rend(pathname), '/').base(), end(pathname));
+    return std::string(std::find(pathname.rbegin(), pathname.rend(), '/').base(), end(pathname));
 }
 
 std::string remove_extension(const std::string& filename)
 {
-    auto pivot = std::find(rbegin(filename), rend(filename), '.');
+    auto pivot = std::find(filename.rbegin(), filename.rend(), '.');
     return pivot == filename.rend() ? filename : std::string(begin(filename), pivot.base() - 1);
 }
 
@@ -1098,9 +1122,9 @@ int main(int argc, const char *argv[])
     llvm::WriteBitcodeToFile(&ctx.module_, os);
     os.close();
     
-    system(("/usr/local/opt/llvm/bin/llc -filetype=obj " + project_path + bc_file_name + " -o " + project_path + obj_file_name).c_str());
-    system(("clang -std=c11 -O1 -Wall -Werror -c " + project_path + "lib.c" + " -o "  + project_path + "lib.o").c_str());
-    system(("clang " + project_path + "lib.o " + project_path + obj_file_name + " -o " + project_path + exe_file_name).c_str());
+    system(("llc-3.7 -filetype=obj " + project_path + bc_file_name + " -o " + project_path + obj_file_name).c_str());
+    system(("clang-3.7 -std=c11 -O1 -Wall -Werror -c " + project_path + "lib.c" + " -o "  + project_path + "lib.o").c_str());
+    system(("clang-3.7 " + project_path + "lib.o " + project_path + obj_file_name + " -o " + project_path + exe_file_name).c_str());
     
     return 0;
 }

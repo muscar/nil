@@ -1,5 +1,11 @@
+extern def version() -> *int8
 extern def println() -> int32
 extern def print_int32(n: int32) -> int32
+extern def print_string(s: *int8) -> int32
+
+struct String:
+    c_str: *int8
+    len: int64
 
 struct Point:
     x: int32
@@ -28,5 +34,8 @@ def main() -> int32:
     print_int32(l.p1.y)
     println()
     print_point(p2)
+    println()
+    v = version()
+    print_string(v)
     println()
     0

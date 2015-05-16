@@ -1,16 +1,17 @@
-CC=clang++
+CC=clang++-3.7
 CXXFLAGS=-std=c++1y -Wall
-LDFLAGS=$(shell /usr/local/opt/llvm/bin/llvm-config --cppflags --ldflags --libs core native bitwriter support --system-libs)
+CXXFLAGS+=$(shell llvm-config-3.7 --cppflags)
+LDFLAGS=$(shell llvm-config-3.7 --ldflags --libs core native bitwriter support --system-libs)
 TARGET=klc
 
 VALGRIND=valgrind
 VALGRINDFLAGS=--leak-check=full --show-leak-kinds=all
 
 all:
-	$(CC) $(CXXFLAGS) $(LDFLAGS) -O2 klc.cpp -o $(TARGET)
+	$(CC) $(CXXFLAGS) -O2 klc.cpp -o $(TARGET) $(LDFLAGS)
 
 debug:
-	$(CC) $(CXXFLAGS) $(LDFLAGS) -g -UNDEBUG klc.cpp -o $(TARGET)
+	$(CC) $(CXXFLAGS) -g -UNDEBUG klc.cpp -o $(TARGET) $(LDFLAGS)
 
 memcheck:
 	$(VALGRIND) $(VALGRINDFLAGS) ./$(TARGET) $(SOURCE)
